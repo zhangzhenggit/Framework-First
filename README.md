@@ -44,8 +44,10 @@
 - 同一份 `framework.jar` 内容和同一 base SDK 会复用同一缓存
 - 多工程同时打开不会互相覆盖
 - 旧缓存会按最后访问时间清理
+- 失效的历史 overlay SDK 定义会在后续运行中清理，避免 IDE SDK 列表长期累积脏项
 - 不会在目标工程根目录生成 `.framework-first-sdk`
 - overlay 使用的是 merged `android.jar`，能减少“hidden API 修好了，但标准 SDK 反而出现假红”的问题
+- 每份 merged cache 都会附带 `.merge-report.txt`，用于定位合并回退和冲突样本
 
 ## 构建要求
 

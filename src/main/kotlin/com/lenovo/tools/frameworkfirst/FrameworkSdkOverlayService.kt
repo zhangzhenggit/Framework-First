@@ -3,6 +3,7 @@ package com.lenovo.tools.frameworkfirst
 import com.android.sdklib.IAndroidTarget
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.projectRoots.ProjectJdkTable
 import com.intellij.openapi.projectRoots.Sdk
@@ -24,6 +25,8 @@ import java.time.Duration
 
 @Service(Service.Level.PROJECT)
 class FrameworkSdkOverlayService(private val project: Project) {
+    private val logger = Logger.getInstance(FrameworkSdkOverlayService::class.java)
+
     fun resolveBaseSdk(sdk: Sdk): Sdk {
         val table = ProjectJdkTable.getInstance()
         val baseName = baseSdkName(sdk.name)
@@ -58,8 +61,10 @@ class FrameworkSdkOverlayService(private val project: Project) {
     }
 
     fun cleanupLegacyArtifacts() {
+        cleanupExpiredCaches(cacheRoot(), keepFingerprint = null)
         cleanupLegacyProjectCache()
         cleanupLegacyOverlaySdks()
+        cleanupStaleOverlaySdks()
     }
 
     private fun overlaySdkName(baseSdkName: String, fingerprint: String): String {
@@ -210,18 +215,20 @@ class FrameworkSdkOverlayService(private val project: Project) {
 
         recreateDirectory(overlayPlatformDir)
         copyDirectory(basePlatformDir, overlayPlatformDir)
-        AndroidJarMerger.merge(
+        val mergeReport = AndroidJarMerger.merge(
             baseAndroidJar = baseAndroidJar,
             frameworkJar = frameworkJarPath,
             outputJar = mergedAndroidJar,
         )
         Files.createDirectories(cacheEntryRoot)
         Files.writeString(stampFile, expectedStamp)
+        writeMergeReport(cacheEntryRoot.resolve(MERGE_REPORT_FILE_NAME), mergeReport)
         touchCache(accessFile)
+        logMergeReport(baseSdk.name, fingerprint, mergeReport)
         return overlayHome
     }
 
-    private fun cleanupExpiredCaches(cacheRoot: Path, keepFingerprint: String) {
+    private fun cleanupExpiredCaches(cacheRoot: Path, keepFingerprint: String?) {
         if (!Files.isDirectory(cacheRoot)) {
             return
         }
@@ -229,7 +236,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
         val expireBefore = System.currentTimeMillis() - CACHE_TTL.toMillis()
         Files.list(cacheRoot).use { entries ->
             entries.filter(Files::isDirectory).forEach { entry ->
-                if (entry.fileName.toString() == keepFingerprint) {
+                if (keepFingerprint != null && entry.fileName.toString() == keepFingerprint) {
                     return@forEach
                 }
                 val accessFile = entry.resolve(ACCESS_FILE_NAME)
@@ -346,6 +353,18 @@ class FrameworkSdkOverlayService(private val project: Project) {
         return roots.filter { seen.add(it.url) }
     }
 
+    private fun cleanupStaleOverlaySdks() {
+        val table = ProjectJdkTable.getInstance()
+        val managedCacheRoot = cacheRoot().normalize()
+        table.allJdks
+            .filter(::isManagedOverlaySdk)
+            .filter { sdk -> isStaleOverlaySdk(sdk, managedCacheRoot) }
+            .forEach { sdk ->
+                logger.info("Removing stale Framework-First SDK ${sdk.name}")
+                table.removeJdk(sdk)
+            }
+    }
+
     private fun cleanupLegacyProjectCache() {
         val projectBase = project.basePath?.let(Path::of)?.normalize() ?: return
         val legacyCache = projectBase.resolve(LEGACY_PROJECT_CACHE_DIR)
@@ -364,6 +383,81 @@ class FrameworkSdkOverlayService(private val project: Project) {
                     sdk.homePath?.startsWith(legacyHome) == true
             }
             .forEach { sdk -> table.removeJdk(sdk) }
+    }
+
+    private fun isManagedOverlaySdk(sdk: Sdk): Boolean {
+        return MANAGED_SDK_NAME_REGEX.matches(sdk.name)
+    }
+
+    private fun isStaleOverlaySdk(sdk: Sdk, managedCacheRoot: Path): Boolean {
+        val homePath = sdk.homePath?.takeIf { it.isNotBlank() } ?: return true
+        val home = runCatching { Path.of(homePath).normalize() }.getOrNull() ?: return true
+        if (!Files.isDirectory(home)) {
+            return true
+        }
+        if (!hasPlatformAndroidJar(home)) {
+            return true
+        }
+        if (home.startsWith(managedCacheRoot)) {
+            val cacheEntryRoot = home.parent ?: return true
+            if (!Files.isRegularFile(cacheEntryRoot.resolve(STAMP_FILE_NAME))) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun hasPlatformAndroidJar(home: Path): Boolean {
+        val platformsDir = home.resolve("platforms")
+        if (!Files.isDirectory(platformsDir)) {
+            return false
+        }
+        Files.list(platformsDir).use { platforms ->
+            return platforms.anyMatch { platformDir ->
+                Files.isRegularFile(platformDir.resolve(ANDROID_JAR_NAME))
+            }
+        }
+    }
+
+    private fun writeMergeReport(reportFile: Path, report: AndroidJarMergeReport) {
+        Files.writeString(
+            reportFile,
+            buildString {
+                appendLine("mergedExistingClasses=${report.mergedExistingClasses}")
+                appendLine("copiedFrameworkOnlyClasses=${report.copiedFrameworkOnlyClasses}")
+                appendLine("addedFields=${report.addedFields}")
+                appendLine("addedMethods=${report.addedMethods}")
+                appendLine("addedInnerClasses=${report.addedInnerClasses}")
+                appendLine("mergedClassAnnotations=${report.mergedClassAnnotations}")
+                appendLine("mergedClassAttributes=${report.mergedClassAttributes}")
+                appendLine("skippedDuplicateFields=${report.skippedDuplicateFields}")
+                appendLine("skippedDuplicateMethods=${report.skippedDuplicateMethods}")
+                appendLine("fallbackClassCount=${report.fallbackClasses.size}")
+                report.fallbackClasses
+                    .take(MERGE_REPORT_SAMPLE_LIMIT)
+                    .forEach { fallback ->
+                        appendLine("fallback=$fallback")
+                    }
+            },
+        )
+    }
+
+    private fun logMergeReport(
+        baseSdkName: String,
+        fingerprint: String,
+        report: AndroidJarMergeReport,
+    ) {
+        if (report.fallbackClasses.isEmpty()) {
+            return
+        }
+
+        val sample = report.fallbackClasses
+            .take(MERGE_REPORT_SAMPLE_LIMIT)
+            .joinToString(" | ")
+        logger.warn(
+            "Framework-First merge fallback for $baseSdkName " +
+                "[${fingerprint.take(SHORT_HASH_LENGTH)}]: ${report.fallbackClasses.size} class(es). $sample",
+        )
     }
 
     private fun deleteDirectory(directory: Path) {
@@ -418,14 +512,17 @@ class FrameworkSdkOverlayService(private val project: Project) {
 
     private companion object {
         val FINGERPRINT_SUFFIX_REGEX = Regex(""" \[framework-first:[0-9a-f]{8}]$""")
+        val MANAGED_SDK_NAME_REGEX = Regex(""".+ \[framework-first:[0-9a-f]{8}]$""")
         val CACHE_TTL: Duration = Duration.ofDays(30)
         const val LEGACY_SDK_SUFFIX = " [framework-first]"
         const val LEGACY_PROJECT_CACHE_DIR = ".framework-first-sdk"
-        const val CACHE_SCHEMA_VERSION = "4"
+        const val CACHE_SCHEMA_VERSION = "5"
         const val CACHE_ROOT_DIR = "Framework-First/cache"
         const val ANDROID_JAR_NAME = "android.jar"
         const val STAMP_FILE_NAME = ".stamp"
         const val ACCESS_FILE_NAME = ".last-access"
+        const val MERGE_REPORT_FILE_NAME = ".merge-report.txt"
+        const val MERGE_REPORT_SAMPLE_LIMIT = 10
         const val SHORT_HASH_LENGTH = 8
     }
 }
