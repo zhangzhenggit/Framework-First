@@ -1,0 +1,27 @@
+<idea-plugin>
+    <id>com.lenovo.tools.frameworkfirst</id>
+    <name>Framework-First</name>
+    <vendor>Lenovo</vendor>
+
+    <description><![CDATA[
+    IDE-only framework-first overlay for Android source trees that compile against
+    <code>.common_libs/framework.jar</code>. The plugin creates a cached synthetic Android
+    SDK home under the IDE system cache, keeps the official platform <code>android.jar</code>
+    as the base, merges in hidden members and classes from the project framework jar, and
+    rebinds Android modules to that overlay SDK for code insight, completion, and navigation.
+    It does not change Gradle build logic.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+    <depends>org.jetbrains.android</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Framework-First" displayType="BALLOON" isLogByDefault="true"/>
+        <postStartupActivity implementation="com.lenovo.tools.frameworkfirst.FrameworkOverlayStartupActivity"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.android.gradle.sync">
+        <postSyncProjectSetupStep implementation="com.lenovo.tools.frameworkfirst.FrameworkOverlaySyncStep"/>
+    </extensions>
+</idea-plugin>
