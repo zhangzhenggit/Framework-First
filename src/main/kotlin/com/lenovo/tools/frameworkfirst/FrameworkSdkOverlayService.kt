@@ -33,23 +33,17 @@ class FrameworkSdkOverlayService(private val project: Project) {
         return table.findJdk(baseName, sdk.sdkType.name) ?: sdk
     }
 
-    fun ensureOverlaySdk(
+    fun prepareOverlay(
         baseSdk: Sdk,
-        frameworkJarFile: VirtualFile,
-    ): Sdk {
+        frameworkJarPath: Path,
+    ): PreparedOverlaySpec {
         val baseAdditionalData = AndroidSdkAdditionalData.from(baseSdk)
         val targetHash = resolveTargetHash(baseSdk, baseAdditionalData)
         val basePlatformDir = resolveBasePlatformDir(baseSdk, baseAdditionalData, targetHash)
             ?: error("Cannot resolve base platform dir for ${baseSdk.name}")
-        val frameworkJarPath = frameworkJarFile.toNioPath().normalize()
         val fingerprint = buildFingerprint(baseSdk, frameworkJarPath, targetHash)
         val overlayName = overlaySdkName(baseSdk.name, fingerprint)
-        val table = ProjectJdkTable.getInstance()
-        val overlaySdk = table.findJdk(overlayName, baseSdk.sdkType.name)
-            ?: createOverlaySdk(table, baseSdk, overlayName)
-
-        syncOverlaySdk(
-            overlaySdk = overlaySdk,
+        val overlayHome = ensureSyntheticSdkHome(
             overlayName = overlayName,
             baseSdk = baseSdk,
             frameworkJarPath = frameworkJarPath,
@@ -57,14 +51,43 @@ class FrameworkSdkOverlayService(private val project: Project) {
             targetHash = targetHash,
             fingerprint = fingerprint,
         )
+        return PreparedOverlaySpec(
+            baseSdk = baseSdk,
+            overlayName = overlayName,
+            overlayHome = overlayHome,
+            platformDirName = basePlatformDir.fileName.toString(),
+            targetHash = targetHash,
+        )
+    }
+
+    fun applyPreparedOverlay(prepared: PreparedOverlaySpec): Sdk {
+        val table = ProjectJdkTable.getInstance()
+        val overlaySdk = table.findJdk(prepared.overlayName, prepared.baseSdk.sdkType.name)
+            ?: createOverlaySdk(table, prepared.baseSdk, prepared.overlayName)
+
+        syncOverlaySdk(
+            overlaySdk = overlaySdk,
+            overlayName = prepared.overlayName,
+            baseSdk = prepared.baseSdk,
+            overlayHome = prepared.overlayHome,
+            platformDirName = prepared.platformDirName,
+            targetHash = prepared.targetHash,
+        )
         return overlaySdk
     }
 
-    fun cleanupLegacyArtifacts() {
+    fun cleanupDiskArtifacts() {
         cleanupExpiredCaches(cacheRoot(), keepFingerprint = null)
         cleanupLegacyProjectCache()
+    }
+
+    fun cleanupSdkDefinitions() {
         cleanupLegacyOverlaySdks()
         cleanupStaleOverlaySdks()
+    }
+
+    fun isUsableManagedOverlaySdk(sdk: Sdk): Boolean {
+        return isManagedOverlaySdk(sdk) && !isStaleOverlaySdk(sdk, cacheRoot().normalize())
     }
 
     private fun overlaySdkName(baseSdkName: String, fingerprint: String): String {
@@ -95,19 +118,11 @@ class FrameworkSdkOverlayService(private val project: Project) {
         overlaySdk: Sdk,
         overlayName: String,
         baseSdk: Sdk,
-        frameworkJarPath: Path,
-        basePlatformDir: Path,
+        overlayHome: Path,
+        platformDirName: String,
         targetHash: String?,
-        fingerprint: String,
     ) {
-        val overlayHome = ensureSyntheticSdkHome(
-            baseSdk = baseSdk,
-            basePlatformDir = basePlatformDir,
-            frameworkJarPath = frameworkJarPath,
-            targetHash = targetHash,
-            fingerprint = fingerprint,
-        )
-        val overlayPlatformDir = overlayHome.resolve("platforms").resolve(basePlatformDir.fileName.toString())
+        val overlayPlatformDir = overlayHome.resolve("platforms").resolve(platformDirName)
         val overlayAndroidJar = overlayPlatformDir.resolve(ANDROID_JAR_NAME)
         val overlayAndroidJarFile = VfsUtil.findFile(overlayAndroidJar, true)
             ?: error("Cannot resolve overlay android.jar at $overlayAndroidJar")
@@ -188,9 +203,10 @@ class FrameworkSdkOverlayService(private val project: Project) {
     }
 
     private fun ensureSyntheticSdkHome(
+        overlayName: String,
         baseSdk: Sdk,
-        basePlatformDir: Path,
         frameworkJarPath: Path,
+        basePlatformDir: Path,
         targetHash: String?,
         fingerprint: String,
     ): Path {
@@ -224,7 +240,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
         Files.writeString(stampFile, expectedStamp)
         writeMergeReport(cacheEntryRoot.resolve(MERGE_REPORT_FILE_NAME), mergeReport)
         touchCache(accessFile)
-        logMergeReport(baseSdk.name, fingerprint, mergeReport)
+        logMergeReport(overlayName, fingerprint, mergeReport)
         return overlayHome
     }
 
@@ -443,21 +459,28 @@ class FrameworkSdkOverlayService(private val project: Project) {
     }
 
     private fun logMergeReport(
-        baseSdkName: String,
+        overlayName: String,
         fingerprint: String,
         report: AndroidJarMergeReport,
     ) {
-        if (report.fallbackClasses.isEmpty()) {
+        if (report.fallbackClasses.isNotEmpty()) {
+            val sample = report.fallbackClasses
+                .take(MERGE_REPORT_SAMPLE_LIMIT)
+                .joinToString(" | ")
+            logger.warn(
+                "Framework-First merge fallback for $overlayName " +
+                    "[${fingerprint.take(SHORT_HASH_LENGTH)}]: ${report.fallbackClasses.size} class(es). $sample",
+            )
             return
         }
 
-        val sample = report.fallbackClasses
-            .take(MERGE_REPORT_SAMPLE_LIMIT)
-            .joinToString(" | ")
-        logger.warn(
-            "Framework-First merge fallback for $baseSdkName " +
-                "[${fingerprint.take(SHORT_HASH_LENGTH)}]: ${report.fallbackClasses.size} class(es). $sample",
-        )
+        if (report.addedFields > 0 || report.addedMethods > 0 || report.copiedFrameworkOnlyClasses > 0) {
+            logger.info(
+                "Framework-First prepared $overlayName [${fingerprint.take(SHORT_HASH_LENGTH)}]: " +
+                    "classes=${report.mergedExistingClasses}/${report.copiedFrameworkOnlyClasses}, " +
+                    "fields=${report.addedFields}, methods=${report.addedMethods}",
+            )
+        }
     }
 
     private fun deleteDirectory(directory: Path) {
@@ -525,4 +548,12 @@ class FrameworkSdkOverlayService(private val project: Project) {
         const val MERGE_REPORT_SAMPLE_LIMIT = 10
         const val SHORT_HASH_LENGTH = 8
     }
+
+    data class PreparedOverlaySpec(
+        val baseSdk: Sdk,
+        val overlayName: String,
+        val overlayHome: Path,
+        val platformDirName: String,
+        val targetHash: String?,
+    )
 }

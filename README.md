@@ -10,6 +10,7 @@
 
 - 插件只改 IDE 侧解析，不改 Gradle 编译逻辑
 - 对每个唯一的 `framework.jar + base SDK` 组合，在 **IDE system cache** 下生成一份合成 Android SDK
+- 首次生成 overlay cache 时会在后台任务中准备，避免把 IDE 前台线程长时间卡住
 - 这份合成 SDK 复用原始平台目录结构，但不会直接用 `framework.jar` 顶掉官方 `android.jar`
 - 插件会以官方 `android.jar` 为底，增量合并 `framework.jar` 中缺失的隐藏字段、方法和类，生成 IDE 使用的 merged `android.jar`
 - Android 模块会被重新绑定到这份 IDE-only overlay SDK，用于代码解析、补全、跳转
@@ -102,6 +103,6 @@ $env:GRADLE_USER_HOME="$PWD\.gradle-home"
 ## 兼容性说明
 
 - 当前版本面向 Android Studio `253.*`
-- 不是只锁当前一个精确小版本
+- 不会只锁当前一个精确小版本
 - 也不承诺未来所有更高版本自动兼容
 - 如果后续要支持新的 Android Studio baseline，需要单独验证后再放开
