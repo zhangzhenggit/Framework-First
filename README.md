@@ -1,81 +1,138 @@
 # Framework-First
 
-`Framework-First` 是一个独立的 Android Studio 插件工程，用来解决这类 Android 源码工程里的 IDE 解析问题：
+`Framework-First` 是一个 Android Studio 插件，用来解决这类 Android 源码工程里的 IDE 解析偏差：
 
 - Gradle 编译能看到 `.common_libs/framework.jar`
 - Android Studio 代码洞察仍优先使用标准 SDK `android.jar`
-- 导致隐藏 API 报红、补全缺成员、跳转不正确
+- 导致隐藏 API 报红、补全缺成员、跳转落错目标
 
-当前稳定主线是 `overlay-home`：
+插件只修改 IDE 侧行为，不改 Gradle 编译逻辑。
 
-- 插件只改 IDE 侧解析，不改 Gradle 编译逻辑
-- 对每个唯一的 `framework.jar + base SDK` 组合，在 **IDE system cache** 下生成一份合成 Android SDK
-- 首次生成 overlay cache 时会在后台任务中准备，避免把 IDE 前台线程长时间卡住
-- 这份合成 SDK 复用原始平台目录结构，但不会直接用 `framework.jar` 顶掉官方 `android.jar`
-- 插件会以官方 `android.jar` 为底，增量合并 `framework.jar` 中缺失的隐藏字段、方法和类，生成 IDE 使用的 merged `android.jar`
-- Android 模块会被重新绑定到这份 IDE-only overlay SDK，用于代码解析、补全、跳转
+## 作用原理
 
-## 目录说明
+插件会根据当前工程实际使用的 Android SDK 和 `framework.jar`，在 IDE system cache 下生成一份仅供 IDE 使用的 overlay SDK：
 
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkOverlayService.kt`
-  负责识别 Android 模块、切换 overlay SDK、清理旧实验遗留
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkSdkOverlayService.kt`
-  负责合成 SDK 缓存、fingerprint 复用、旧缓存清理
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkOverlayStartupActivity.kt`
-  项目打开后重放 overlay
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkOverlaySyncStep.kt`
-  Gradle Sync 后重放 overlay
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkProjectStateService.kt`
-  维护当前工程的启用状态和自定义路径配置，状态落插件侧配置，不写目标工程
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkStatusBarWidgetFactory.kt`
-  提供右下角状态栏开关，只针对当前工程开启或关闭
-- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkProjectConfigurable.kt`
-  提供当前工程的 `Settings` 页，可在自动发现和自定义 `framework.jar` 路径之间切换
+- 以官方 `android.jar` 为底
+- 增量合并 `framework.jar` 中缺失的类、字段、方法
+- 把 AndroidFacet 模块重新绑定到这份 overlay SDK
 
-## 当前约束
+这样做的结果是：
 
-- 当前版本优先识别项目根目录下的 `.common_libs/framework.jar`
-- 如果默认路径不存在，会继续尝试从 Gradle 文件和项目内搜索自动发现 `framework.jar`
-- 如果用户在 `Settings` 页里配置了自定义路径，则优先使用自定义路径
-- 不在目标工程目录生成配置文件
-- 运行时缓存不落目标工程根目录，而是落 IDE system cache
-- 当前发布策略只声明支持 Android Studio `253.*`
-- `framework.jar` 只用于补充官方 SDK 中缺失的 Android 平台成员，不会覆盖 `java.* / libcore` 这层标准类型系统
-- 只对带 `AndroidFacet` 的模块参与 overlay；普通 Java/Kotlin 模块不会参与
+- 默认模式下，优先保持 Android SDK 的正常源码导航和类型系统
+- 需要看 framework 实现时，可以切到 `Framework JAR`
+- 两种模式都只影响 IDE 的解析、补全和跳转，不影响实际编译
 
-## 缓存策略
+## 适用场景
 
-缓存位置在 IDE system cache 下，路径形如：
+适合这类工程：
 
-- `.../system/Framework-First/cache/<fingerprint>/sdk`
+- 工程根目录存在 `.common_libs/framework.jar`
+- Gradle 编译能通过，但 Android Studio 里有隐藏 API 报红
+- 需要在 Android SDK 视图和 framework 实现视图之间切换看代码
 
-特点：
+## 核心功能
 
-- 同一份 `framework.jar` 内容和同一 base SDK 会复用同一缓存
-- 多工程同时打开不会互相覆盖
-- 旧缓存会按最后访问时间清理
-- 失效的历史 overlay SDK 定义会在后续运行中清理，避免 IDE SDK 列表长期累积脏项
-- 不会在目标工程根目录生成 `.framework-first-sdk`
-- overlay 使用的是 merged `android.jar`，能减少“hidden API 修好了，但标准 SDK 反而出现假红”的问题
-- 每份 merged cache 都会附带 `.merge-report.txt`，用于定位合并回退和冲突样本
-
-## 当前工程开关
-
-- 状态栏右下角会显示 `Framework-First` 开关图标
-- 点击后只提供当前工程级 `Enable / Disable`
-- 同一个弹窗里可以直接进入 `Configure Framework Jar...`
-- 开关状态保存在 IDE 配置目录下的插件私有文件中，不写入目标工程
-- 关闭后，当前工程的 AndroidFacet 模块会切回 base SDK；开启后重新应用 overlay
-- `Settings | Tools | Framework-First` 提供单一路径输入框
-- 默认会展示当前生效路径：未自定义时显示自动发现路径，自定义后显示用户选择路径
-- `Reset` 会清除自定义覆盖并恢复到自动发现路径；如果自动发现为空，则恢复为空
-- `Settings` 页支持两种当前工程级 API 查找偏好：
+- 自动发现 `framework.jar`
+- 为当前工程生成并复用 overlay SDK
+- 当前工程级开关：`Enable / Disable`
+- 当前工程级 API 查找优先级：
   - `Android SDK`
   - `Framework JAR`
-- 设置页会同时展示当前工程的基础信息，例如状态、AndroidFacet 模块数、Overlay 模块数和 base SDK
-- `Framework JAR` 会生成独立的 framework-first overlay 和过滤后的 SDK source roots：
-  - framework 中已有的类优先打开原始 `framework.jar` 对应的反编译 class
-  - framework 中没有的类再回退到原始 Android SDK source
+- 支持自定义 `framework.jar` 路径
+- 支持把跳转重定向到原始 SDK source 或原始 `framework.jar`
+
+## 两种模式
+
+### Android SDK
+
+默认模式，适合日常开发。
+
+- SDK 有源码时，优先跳原始 Android SDK source
+- SDK 没源码时，回退到原始 Android SDK class
+- SDK 没有该类或成员时，再回退到原始 `framework.jar`
+
+### Framework JAR
+
+适合排查 framework 新增逻辑或平台差异。
+
+- framework 中已有的类优先打开原始 `framework.jar` 对应的 class
+- framework 中没有的类再回退到原始 Android SDK source / class
+- 不改变编译逻辑，只改变 IDE 查找与跳转优先级
+
+## 自动发现策略
+
+当前发现顺序如下：
+
+1. 项目根目录 `.common_libs/framework.jar`
+2. 项目根目录 `common_libs/framework.jar`
+3. 扫描工程内 `build.gradle` / `build.gradle.kts` / `settings.gradle` / `settings.gradle.kts`
+4. 工程目录内有限深度搜索 `framework.jar`
+
+如果在 `Settings | Tools | Framework-First` 中配置了自定义路径，则优先使用自定义路径。
+
+## 使用方法
+
+1. 在 Android Studio 里安装插件 zip
+2. 重启 IDE 并重新打开工程
+3. 确认右下角出现 `Framework-First` 图标
+4. 默认直接使用 `Android SDK` 模式
+5. 如需查看 framework 实现，可在设置页把 `API Lookup Priority` 切到 `Framework JAR`
+
+设置页入口：
+
+- `Settings | Tools | Framework-First`
+
+状态栏入口：
+
+- 右下角 `Framework-First` 图标
+
+## 设置项说明
+
+### Framework Jar Path
+
+- 默认显示当前生效路径
+- 未自定义时，显示自动发现到的路径
+- 自定义后，显示用户选择的路径
+- `Reset` 会清除自定义覆盖并恢复为自动发现路径
+
+### API Lookup Priority
+
+- `Android SDK`
+- `Framework JAR`
+
+这项是当前工程级设置，只保存在 IDE 配置目录下的插件私有状态文件中，不写回目标工程。
+
+## 缓存与状态
+
+插件运行时会在 IDE 外部目录写两类数据：
+
+### 1. IDE system cache
+
+用于保存 overlay SDK 和 merged `android.jar`。
+
+通用路径形态：
+
+- `<IDE system>/Framework-First/cache/<fingerprint>/sdk`
+
+### 2. IDE config
+
+用于保存当前工程的开关状态、自定义 `framework.jar` 路径和当前模式。
+
+通用路径形态：
+
+- `<IDE config>/Framework-First/project-state.properties`
+
+## 清理旧缓存
+
+如果需要彻底排除旧版本干扰，建议清理这两类目录：
+
+- IDE system cache 下的 `Framework-First`
+- IDE config 下的 `Framework-First`
+
+清理后影响：
+
+- overlay SDK 会在下次打开工程时重新生成
+- 当前工程的插件开关状态、自定义路径、模式设置会恢复默认
 
 ## 构建要求
 
@@ -87,7 +144,7 @@
 $env:FRAMEWORK_FIRST_STUDIO_PATH='D:\Android\Android Studio Panda'
 ```
 
-2. 或在当前工程根目录放一个 **不提交版本库** 的 `local.properties`
+2. 或在当前工程根目录放一个不提交版本库的 `local.properties`
 
 ```properties
 studioPath=D:/Android/Android Studio Panda
@@ -95,7 +152,7 @@ studioPath=D:/Android/Android Studio Panda
 
 ## 构建方式
 
-推荐在本工程根目录执行：
+在本工程根目录执行：
 
 ```powershell
 $env:JAVA_HOME='D:\Android\Android Studio Panda\jbr'
@@ -103,9 +160,13 @@ $env:GRADLE_USER_HOME="$PWD\.gradle-home"
 .\gradlew.bat buildPlugin --no-daemon
 ```
 
-产物位置：
+构建产物：
 
 - `build/distributions/Framework-First-<version>.zip`
+
+仓库内同时保留一份当前发布包：
+
+- `release/Framework-First-<version>.zip`
 
 ## 安装方式
 
@@ -113,23 +174,32 @@ $env:GRADLE_USER_HOME="$PWD\.gradle-home"
 
 - `Settings / Plugins / Install Plugin from Disk...`
 
-然后选择 `build/distributions` 下的 zip 包并重启 IDE。
+然后选择 zip 包并重启 IDE。
 
-## 验证入口
+## 验证建议
 
-当前建议验证类：
+建议验证：
 
-- `Settings/src/com/android/settings/notification/modes/ZenModeOtherLinkPreferenceController.java`
+- 隐藏 API 不再报红
+- `Android SDK` 模式下优先跳 SDK source
+- `Framework JAR` 模式下优先跳 framework class
+- 切换模式后跳转目标和路径显示符合预期
 
-预期行为：
+## 兼容性
 
-- 代码不再因为 `framework.jar` 里的隐藏成员而报红
-- 补全可见对应隐藏 API
-- 跳转优先进入源码视图，而不是错误版本的标准 SDK stub
+- 当前版本声明支持 Android Studio `253.*`
+- 不承诺未来所有更高版本自动兼容
+- 如果后续要支持新的 Android Studio baseline，需要单独验证
 
-## 兼容性说明
+## 下载建议
 
-- 当前版本面向 Android Studio `253.*`
-- 不会只锁当前一个精确小版本
-- 也不承诺未来所有更高版本自动兼容
-- 如果后续要支持新的 Android Studio baseline，需要单独验证后再放开
+当前建议两种发布方式：
+
+1. 仓库内保留 `release/Framework-First-<version>.zip`
+   - 简单直接
+   - 团队成员可以直接在 GitHub 仓库里下载
+2. 后续再补 GitHub Release
+   - 更适合正式对外分发
+   - 可以把 zip 作为 Release Asset 提供下载
+
+当前仓库内保留 `release/` 目录，适合作为团队内部下载入口。
