@@ -136,7 +136,7 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
             )
             addSeparator()
             add(
-                object : AnAction("Configure Framework Jar...") {
+                object : AnAction("Settings") {
                     override fun actionPerformed(event: AnActionEvent) {
                         FrameworkProjectConfigurable.open(project)
                     }
