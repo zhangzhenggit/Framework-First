@@ -69,7 +69,13 @@
 - `Settings | Tools | Framework-First` 提供单一路径输入框
 - 默认会展示当前生效路径：未自定义时显示自动发现路径，自定义后显示用户选择路径
 - `Reset` 会清除自定义覆盖并恢复到自动发现路径；如果自动发现为空，则恢复为空
+- `Settings` 页支持两种当前工程级 API 查找偏好：
+  - `Android SDK`
+  - `Framework JAR`
 - 设置页会同时展示当前工程的基础信息，例如状态、AndroidFacet 模块数、Overlay 模块数和 base SDK
+- `Framework JAR` 会生成独立的 framework-first overlay 和过滤后的 SDK source roots：
+  - framework 中已有的类优先打开原始 `framework.jar` 对应的反编译 class
+  - framework 中没有的类再回退到原始 Android SDK source
 
 ## 构建要求
 

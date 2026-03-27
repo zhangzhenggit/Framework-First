@@ -29,11 +29,17 @@ data class AndroidJarMergeReport(
     val fallbackClasses: List<String>,
 )
 
+enum class AndroidJarMergeStrategy {
+    SDK_FIRST,
+    FRAMEWORK_FIRST,
+}
+
 object AndroidJarMerger {
     fun merge(
         baseAndroidJar: Path,
         frameworkJar: Path,
         outputJar: Path,
+        strategy: AndroidJarMergeStrategy = AndroidJarMergeStrategy.SDK_FIRST,
     ): AndroidJarMergeReport {
         Files.createDirectories(outputJar.parent)
         val frameworkClasses = loadFrameworkClasses(frameworkJar)
@@ -67,7 +73,12 @@ object AndroidJarMerger {
                             shouldMergeExistingClass(entry.name) -> {
                                 frameworkClasses.remove(entry.name)
                                     ?.let { frameworkBytes ->
-                                        val mergeResult = mergeClass(entry.name, baseBytes, frameworkBytes)
+                                        val mergeResult = mergeClass(
+                                            entryName = entry.name,
+                                            sdkBytes = baseBytes,
+                                            frameworkBytes = frameworkBytes,
+                                            strategy = strategy,
+                                        )
                                         stats.recordMerge(mergeResult)
                                         mergeResult.bytes
                                     }
@@ -130,43 +141,53 @@ object AndroidJarMerger {
 
     private fun mergeClass(
         entryName: String,
-        baseBytes: ByteArray,
+        sdkBytes: ByteArray,
         frameworkBytes: ByteArray,
+        strategy: AndroidJarMergeStrategy,
     ): ClassMergeResult {
         return runCatching {
-            val baseNode = readClassNode(baseBytes)
+            val sdkNode = readClassNode(sdkBytes)
             val frameworkNode = readClassNode(frameworkBytes)
-            if (baseNode.name != frameworkNode.name) {
+            if (sdkNode.name != frameworkNode.name) {
                 return@runCatching ClassMergeResult.fallback(
-                    bytes = baseBytes,
+                    bytes = preferredBytes(strategy, sdkBytes, frameworkBytes),
                     className = entryName,
-                    reason = "Mismatched internal name: ${baseNode.name} vs ${frameworkNode.name}",
+                    reason = "Mismatched internal name: ${sdkNode.name} vs ${frameworkNode.name}",
                 )
             }
 
-            baseNode.version = maxOf(baseNode.version, frameworkNode.version)
-            baseNode.signature = baseNode.signature ?: frameworkNode.signature
-            baseNode.sourceFile = baseNode.sourceFile ?: frameworkNode.sourceFile
-            baseNode.sourceDebug = baseNode.sourceDebug ?: frameworkNode.sourceDebug
-            baseNode.outerClass = baseNode.outerClass ?: frameworkNode.outerClass
-            baseNode.outerMethod = baseNode.outerMethod ?: frameworkNode.outerMethod
-            baseNode.outerMethodDesc = baseNode.outerMethodDesc ?: frameworkNode.outerMethodDesc
-            if (baseNode.nestHostClass == null) {
-                baseNode.nestHostClass = frameworkNode.nestHostClass
+            val primaryNode = when (strategy) {
+                AndroidJarMergeStrategy.SDK_FIRST -> sdkNode
+                AndroidJarMergeStrategy.FRAMEWORK_FIRST -> frameworkNode
+            }
+            val secondaryNode = when (strategy) {
+                AndroidJarMergeStrategy.SDK_FIRST -> frameworkNode
+                AndroidJarMergeStrategy.FRAMEWORK_FIRST -> sdkNode
             }
 
-            val metadataResult = mergeClassMetadata(baseNode, frameworkNode)
-            val fieldResult = mergeFields(baseNode, frameworkNode)
-            val methodResult = mergeMethods(baseNode, frameworkNode)
-            val innerClassCount = mergeInnerClasses(baseNode, frameworkNode)
-            baseNode.nestMembers = mergeStringLists(baseNode.nestMembers, frameworkNode.nestMembers)
-            baseNode.permittedSubclasses = mergeStringLists(
-                baseNode.permittedSubclasses,
-                frameworkNode.permittedSubclasses,
+            primaryNode.version = maxOf(primaryNode.version, secondaryNode.version)
+            primaryNode.signature = primaryNode.signature ?: secondaryNode.signature
+            primaryNode.sourceFile = primaryNode.sourceFile ?: secondaryNode.sourceFile
+            primaryNode.sourceDebug = primaryNode.sourceDebug ?: secondaryNode.sourceDebug
+            primaryNode.outerClass = primaryNode.outerClass ?: secondaryNode.outerClass
+            primaryNode.outerMethod = primaryNode.outerMethod ?: secondaryNode.outerMethod
+            primaryNode.outerMethodDesc = primaryNode.outerMethodDesc ?: secondaryNode.outerMethodDesc
+            if (primaryNode.nestHostClass == null) {
+                primaryNode.nestHostClass = secondaryNode.nestHostClass
+            }
+
+            val metadataResult = mergeClassMetadata(primaryNode, secondaryNode)
+            val fieldResult = mergeFields(primaryNode, secondaryNode)
+            val methodResult = mergeMethods(primaryNode, secondaryNode)
+            val innerClassCount = mergeInnerClasses(primaryNode, secondaryNode)
+            primaryNode.nestMembers = mergeStringLists(primaryNode.nestMembers, secondaryNode.nestMembers)
+            primaryNode.permittedSubclasses = mergeStringLists(
+                primaryNode.permittedSubclasses,
+                secondaryNode.permittedSubclasses,
             )
 
             val writer = ClassWriter(0)
-            baseNode.accept(writer)
+            primaryNode.accept(writer)
             ClassMergeResult(
                 bytes = writer.toByteArray(),
                 mergedExistingClass = true,
@@ -181,7 +202,7 @@ object AndroidJarMerger {
             )
         }.getOrElse { throwable ->
             ClassMergeResult.fallback(
-                bytes = baseBytes,
+                bytes = preferredBytes(strategy, sdkBytes, frameworkBytes),
                 className = entryName,
                 reason = buildFallbackReason(throwable),
             )
@@ -387,6 +408,17 @@ object AndroidJarMerger {
             throwable.javaClass.simpleName
         } else {
             "${throwable.javaClass.simpleName}: ${detail.take(MAX_FALLBACK_REASON_LENGTH)}"
+        }
+    }
+
+    private fun preferredBytes(
+        strategy: AndroidJarMergeStrategy,
+        sdkBytes: ByteArray,
+        frameworkBytes: ByteArray,
+    ): ByteArray {
+        return when (strategy) {
+            AndroidJarMergeStrategy.SDK_FIRST -> sdkBytes
+            AndroidJarMergeStrategy.FRAMEWORK_FIRST -> frameworkBytes
         }
     }
 

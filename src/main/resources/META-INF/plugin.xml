@@ -20,6 +20,7 @@
         <notificationGroup id="Framework-First" displayType="BALLOON" isLogByDefault="true"/>
         <postStartupActivity implementation="com.lenovo.tools.frameworkfirst.FrameworkOverlayStartupActivity"/>
         <statusBarWidgetFactory implementation="com.lenovo.tools.frameworkfirst.FrameworkStatusBarWidgetFactory"/>
+        <gotoDeclarationHandler implementation="com.lenovo.tools.frameworkfirst.FrameworkOriginNavigationHandler"/>
         <projectConfigurable
                 id="com.lenovo.tools.frameworkfirst.project"
                 parentId="tools"

@@ -43,6 +43,13 @@ class FrameworkProjectStateService(private val project: Project) {
         updateSettings(updated)
     }
 
+    fun setViewPreference(viewPreference: FrameworkViewPreference) {
+        if (settings.viewPreference == viewPreference) {
+            return
+        }
+        updateSettings(settings.copy(viewPreference = viewPreference))
+    }
+
     fun addListener(parentDisposable: Disposable, listener: () -> Unit) {
         listeners.add(listener)
         Disposer.register(parentDisposable) {
@@ -74,6 +81,9 @@ class FrameworkProjectStateService(private val project: Project) {
                 FrameworkJarPathMode.CUSTOM -> legacyCustomPath
                 FrameworkJarPathMode.AUTO -> null
             },
+            viewPreference = properties.getProperty(projectStateKey(KEY_VIEW_PREFERENCE))
+                ?.let(FrameworkViewPreference::fromStorageValue)
+                ?: FrameworkViewPreference.SDK_FIRST,
         )
     }
 
@@ -82,6 +92,10 @@ class FrameworkProjectStateService(private val project: Project) {
             val properties = loadProperties()
             properties.setProperty(projectStateKey(KEY_ENABLED), settings.enabled.toString())
             properties.remove(projectStateKey(KEY_PATH_MODE))
+            properties.setProperty(
+                projectStateKey(KEY_VIEW_PREFERENCE),
+                settings.viewPreference.storageValue,
+            )
             if (settings.customFrameworkJar.isNullOrBlank()) {
                 properties.remove(projectStateKey(KEY_CUSTOM_FRAMEWORK_JAR))
             } else {
@@ -133,6 +147,7 @@ class FrameworkProjectStateService(private val project: Project) {
         const val PROJECT_STATE_FILE_NAME = "project-state.properties"
         const val KEY_ENABLED = "enabled"
         const val KEY_PATH_MODE = "pathMode"
+        const val KEY_VIEW_PREFERENCE = "viewPreference"
         const val KEY_CUSTOM_FRAMEWORK_JAR = "customFrameworkJar"
         val fileLock = Any()
     }
@@ -141,6 +156,7 @@ class FrameworkProjectStateService(private val project: Project) {
 data class FrameworkProjectSettings(
     val enabled: Boolean = true,
     val customFrameworkJar: String? = null,
+    val viewPreference: FrameworkViewPreference = FrameworkViewPreference.SDK_FIRST,
 )
 
 enum class FrameworkJarPathMode(val storageValue: String) {
@@ -151,6 +167,24 @@ enum class FrameworkJarPathMode(val storageValue: String) {
     companion object {
         fun fromStorageValue(value: String): FrameworkJarPathMode {
             return entries.firstOrNull { mode -> mode.storageValue == value } ?: AUTO
+        }
+    }
+}
+
+enum class FrameworkViewPreference(
+    val storageValue: String,
+    val displayName: String,
+    val sdkTag: String,
+) {
+    SDK_FIRST("sdk-first", "Android SDK", "sdk"),
+    FRAMEWORK_FIRST("framework-first", "Framework JAR", "fw"),
+    ;
+
+    override fun toString(): String = displayName
+
+    companion object {
+        fun fromStorageValue(value: String): FrameworkViewPreference {
+            return entries.firstOrNull { preference -> preference.storageValue == value } ?: SDK_FIRST
         }
     }
 }

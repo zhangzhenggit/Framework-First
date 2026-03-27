@@ -12,6 +12,7 @@ data class FrameworkOverlayConfig(
     val configuredCustomFrameworkJar: String?,
     val hasCustomFrameworkOverride: Boolean,
     val discoverySource: String?,
+    val viewPreference: FrameworkViewPreference,
 )
 
 object FrameworkOverlayConfigLoader {
@@ -26,7 +27,14 @@ object FrameworkOverlayConfigLoader {
 
     fun load(project: Project): FrameworkOverlayConfig {
         val basePath = project.basePath?.let(Path::of)
-            ?: return FrameworkOverlayConfig(null, null, null, false, null)
+            ?: return FrameworkOverlayConfig(
+                frameworkJar = null,
+                autoDetectedFrameworkJar = null,
+                configuredCustomFrameworkJar = null,
+                hasCustomFrameworkOverride = false,
+                discoverySource = null,
+                viewPreference = FrameworkViewPreference.SDK_FIRST,
+            )
         val state = project.getService(FrameworkProjectStateService::class.java).settings()
         val autoDetectedFrameworkJar = discoverAutoDetected(basePath)
         val customFrameworkJar = resolveCustomFrameworkJar(basePath, state.customFrameworkJar)
@@ -45,6 +53,7 @@ object FrameworkOverlayConfigLoader {
             configuredCustomFrameworkJar = state.customFrameworkJar,
             hasCustomFrameworkOverride = hasCustomFrameworkOverride,
             discoverySource = discoverySource,
+            viewPreference = state.viewPreference,
         )
     }
 

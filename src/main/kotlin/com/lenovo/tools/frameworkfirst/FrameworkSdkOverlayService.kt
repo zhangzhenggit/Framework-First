@@ -22,6 +22,9 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.jar.JarFile
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipEntry
 
 @Service(Service.Level.PROJECT)
 class FrameworkSdkOverlayService(private val project: Project) {
@@ -36,13 +39,14 @@ class FrameworkSdkOverlayService(private val project: Project) {
     fun prepareOverlay(
         baseSdk: Sdk,
         frameworkJarPath: Path,
+        viewPreference: FrameworkViewPreference,
     ): PreparedOverlaySpec {
         val baseAdditionalData = AndroidSdkAdditionalData.from(baseSdk)
         val targetHash = resolveTargetHash(baseSdk, baseAdditionalData)
         val basePlatformDir = resolveBasePlatformDir(baseSdk, baseAdditionalData, targetHash)
             ?: error("Cannot resolve base platform dir for ${baseSdk.name}")
-        val fingerprint = buildFingerprint(baseSdk, frameworkJarPath, targetHash)
-        val overlayName = overlaySdkName(baseSdk.name, fingerprint)
+        val fingerprint = buildFingerprint(baseSdk, frameworkJarPath, targetHash, viewPreference)
+        val overlayName = overlaySdkName(baseSdk.name, viewPreference, fingerprint)
         val overlayHome = ensureSyntheticSdkHome(
             overlayName = overlayName,
             baseSdk = baseSdk,
@@ -50,6 +54,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
             basePlatformDir = basePlatformDir,
             targetHash = targetHash,
             fingerprint = fingerprint,
+            viewPreference = viewPreference,
         )
         return PreparedOverlaySpec(
             baseSdk = baseSdk,
@@ -57,6 +62,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
             overlayHome = overlayHome,
             platformDirName = basePlatformDir.fileName.toString(),
             targetHash = targetHash,
+            viewPreference = viewPreference,
         )
     }
 
@@ -72,6 +78,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
             overlayHome = prepared.overlayHome,
             platformDirName = prepared.platformDirName,
             targetHash = prepared.targetHash,
+            viewPreference = prepared.viewPreference,
         )
         return overlaySdk
     }
@@ -86,18 +93,27 @@ class FrameworkSdkOverlayService(private val project: Project) {
         cleanupStaleOverlaySdks()
     }
 
-    fun isUsableManagedOverlaySdk(sdk: Sdk): Boolean {
-        return isManagedOverlaySdk(sdk) && !isStaleOverlaySdk(sdk, cacheRoot().normalize())
+    fun isUsableManagedOverlaySdk(
+        sdk: Sdk,
+        expectedPreference: FrameworkViewPreference? = null,
+    ): Boolean {
+        return isManagedOverlaySdk(sdk) &&
+            !isStaleOverlaySdk(sdk, cacheRoot().normalize()) &&
+            (expectedPreference == null || managedOverlayMode(sdk) == expectedPreference)
     }
 
-    private fun overlaySdkName(baseSdkName: String, fingerprint: String): String {
-        return "${baseSdkName(baseSdkName)} [framework-first:${fingerprint.take(SHORT_HASH_LENGTH)}]"
+    private fun overlaySdkName(
+        baseSdkName: String,
+        viewPreference: FrameworkViewPreference,
+        fingerprint: String,
+    ): String {
+        return "${baseSdkName(baseSdkName)} [framework-first:${viewPreference.sdkTag}:${fingerprint.take(SHORT_HASH_LENGTH)}]"
     }
 
     private fun baseSdkName(name: String): String {
         return name
             .removeSuffix(LEGACY_SDK_SUFFIX)
-            .replace(FINGERPRINT_SUFFIX_REGEX, "")
+            .replace(MANAGED_SDK_SUFFIX_REGEX, "")
     }
 
     private fun createOverlaySdk(
@@ -121,6 +137,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
         overlayHome: Path,
         platformDirName: String,
         targetHash: String?,
+        viewPreference: FrameworkViewPreference,
     ) {
         val overlayPlatformDir = overlayHome.resolve("platforms").resolve(platformDirName)
         val overlayAndroidJar = overlayPlatformDir.resolve(ANDROID_JAR_NAME)
@@ -134,7 +151,22 @@ class FrameworkSdkOverlayService(private val project: Project) {
         val desiredClassRoots = deduplicateRoots(
             listOf(overlayAndroidJarRoot) + mapRootsToOverlay(baseClassRoots, baseSdk, overlayHome),
         )
-        val desiredSourceRoots = deduplicateRoots(mapRootsToOverlay(baseSourceRoots, baseSdk, overlayHome))
+        val desiredSourceRoots = when (viewPreference) {
+            FrameworkViewPreference.SDK_FIRST -> {
+                deduplicateRoots(baseSourceRoots)
+            }
+
+            FrameworkViewPreference.FRAMEWORK_FIRST -> {
+                deduplicateRoots(
+                    mapRootsToOverlay(
+                        baseSourceRoots,
+                        baseSdk,
+                        overlayHome,
+                        fallbackToOriginal = true,
+                    ),
+                )
+            }
+        }
         val overlayAdditionalData = AndroidSdkAdditionalData(overlaySdk).apply {
             if (!targetHash.isNullOrBlank()) {
                 setBuildTargetHashString(targetHash)
@@ -209,6 +241,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
         basePlatformDir: Path,
         targetHash: String?,
         fingerprint: String,
+        viewPreference: FrameworkViewPreference,
     ): Path {
         val cacheEntryRoot = cacheRoot().resolve(fingerprint)
         val overlayHome = cacheEntryRoot.resolve("sdk")
@@ -217,7 +250,14 @@ class FrameworkSdkOverlayService(private val project: Project) {
         val mergedAndroidJar = overlayPlatformDir.resolve(ANDROID_JAR_NAME)
         val stampFile = cacheEntryRoot.resolve(STAMP_FILE_NAME)
         val accessFile = cacheEntryRoot.resolve(ACCESS_FILE_NAME)
-        val expectedStamp = buildStamp(baseSdk, basePlatformDir, baseAndroidJar, frameworkJarPath, targetHash)
+        val expectedStamp = buildStamp(
+            baseSdk = baseSdk,
+            basePlatformDir = basePlatformDir,
+            baseAndroidJar = baseAndroidJar,
+            frameworkJarPath = frameworkJarPath,
+            targetHash = targetHash,
+            viewPreference = viewPreference,
+        )
 
         cleanupExpiredCaches(cacheRoot(), keepFingerprint = fingerprint)
 
@@ -235,7 +275,15 @@ class FrameworkSdkOverlayService(private val project: Project) {
             baseAndroidJar = baseAndroidJar,
             frameworkJar = frameworkJarPath,
             outputJar = mergedAndroidJar,
+            strategy = when (viewPreference) {
+                FrameworkViewPreference.SDK_FIRST -> AndroidJarMergeStrategy.SDK_FIRST
+                FrameworkViewPreference.FRAMEWORK_FIRST -> AndroidJarMergeStrategy.FRAMEWORK_FIRST
+            },
         )
+        if (viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
+            validateFrameworkFirstOverlay(mergedAndroidJar)
+            prepareFrameworkPreferredSources(baseSdk, overlayHome, frameworkJarPath)
+        }
         Files.createDirectories(cacheEntryRoot)
         Files.writeString(stampFile, expectedStamp)
         writeMergeReport(cacheEntryRoot.resolve(MERGE_REPORT_FILE_NAME), mergeReport)
@@ -277,10 +325,11 @@ class FrameworkSdkOverlayService(private val project: Project) {
         roots: List<VirtualFile>,
         baseSdk: Sdk,
         overlayHome: Path,
+        fallbackToOriginal: Boolean = true,
     ): List<VirtualFile> {
         val baseHome = baseSdk.homePath?.let(Path::of)?.normalize() ?: return roots
         return roots.mapNotNull { root ->
-            mapRootToOverlay(root, baseHome, overlayHome) ?: root
+            mapRootToOverlay(root, baseHome, overlayHome) ?: if (fallbackToOriginal) root else null
         }
     }
 
@@ -314,21 +363,140 @@ class FrameworkSdkOverlayService(private val project: Project) {
         }
     }
 
+    private fun prepareFrameworkPreferredSources(
+        baseSdk: Sdk,
+        overlayHome: Path,
+        frameworkJarPath: Path,
+    ) {
+        val baseHome = baseSdk.homePath?.let(Path::of)?.normalize() ?: return
+        val excludedSourcePaths = frameworkSourceExclusions(frameworkJarPath)
+        if (excludedSourcePaths.isEmpty()) {
+            return
+        }
+
+        baseSdk.rootProvider.getFiles(OrderRootType.SOURCES).forEach { sourceRoot ->
+            val sourcePath = rootLocalPath(sourceRoot)?.normalize() ?: return@forEach
+            if (!sourcePath.startsWith(baseHome)) {
+                return@forEach
+            }
+            val targetPath = overlayHome.resolve(baseHome.relativize(sourcePath).toString()).normalize()
+            when {
+                sourceRoot.fileSystem is JarFileSystem && Files.isRegularFile(sourcePath) -> {
+                    filterSourceJar(sourcePath, targetPath, excludedSourcePaths)
+                }
+
+                Files.isDirectory(sourcePath) -> {
+                    filterSourceDirectory(sourcePath, targetPath, excludedSourcePaths)
+                }
+            }
+        }
+    }
+
+    private fun frameworkSourceExclusions(frameworkJarPath: Path): Set<String> {
+        val excluded = linkedSetOf<String>()
+        JarFile(frameworkJarPath.toFile()).use { frameworkJar ->
+            val entries = frameworkJar.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory || !entry.name.endsWith(CLASS_FILE_SUFFIX)) {
+                    continue
+                }
+                if (entry.name.startsWith(META_INF_PREFIX) || EXCLUDED_FRAMEWORK_PREFIXES.any(entry.name::startsWith)) {
+                    continue
+                }
+                val topLevelName = entry.name
+                    .removeSuffix(CLASS_FILE_SUFFIX)
+                    .substringBefore('$')
+                excluded += "$topLevelName.java"
+                excluded += "$topLevelName.kt"
+            }
+        }
+        return excluded
+    }
+
+    private fun filterSourceDirectory(
+        sourceDir: Path,
+        targetDir: Path,
+        excludedSourcePaths: Set<String>,
+    ) {
+        recreateDirectory(targetDir)
+        Files.walkFileTree(
+            sourceDir,
+            object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    Files.createDirectories(targetDir.resolve(sourceDir.relativize(dir).toString()))
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    val relativePath = sourceDir.relativize(file).toString().replace('\\', '/')
+                    if (relativePath !in excludedSourcePaths) {
+                        Files.copy(
+                            file,
+                            targetDir.resolve(sourceDir.relativize(file).toString()),
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.COPY_ATTRIBUTES,
+                        )
+                    }
+                    return FileVisitResult.CONTINUE
+                }
+            },
+        )
+    }
+
+    private fun filterSourceJar(
+        sourceJar: Path,
+        targetJar: Path,
+        excludedSourcePaths: Set<String>,
+    ) {
+        Files.createDirectories(targetJar.parent)
+        JarFile(sourceJar.toFile()).use { jarFile ->
+            val manifest = jarFile.manifest
+            Files.newOutputStream(targetJar).use { output ->
+                JarOutputStream(output, manifest ?: java.util.jar.Manifest()).use { jarOutput ->
+                    val writtenEntries = linkedSetOf<String>()
+                    if (manifest != null) {
+                        writtenEntries += JarFile.MANIFEST_NAME
+                    }
+                    val entries = jarFile.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        if (entry.isDirectory || !writtenEntries.add(entry.name)) {
+                            continue
+                        }
+                        if (entry.name in excludedSourcePaths) {
+                            continue
+                        }
+                        val zipEntry = ZipEntry(entry.name).apply {
+                            time = 0L
+                        }
+                        jarOutput.putNextEntry(zipEntry)
+                        jarFile.getInputStream(entry).use { input -> input.copyTo(jarOutput) }
+                        jarOutput.closeEntry()
+                    }
+                }
+            }
+        }
+    }
+
     private fun buildFingerprint(
         baseSdk: Sdk,
         frameworkJarPath: Path,
         targetHash: String?,
+        viewPreference: FrameworkViewPreference,
     ): String {
         val basePlatformDir = resolveBasePlatformDir(baseSdk, AndroidSdkAdditionalData.from(baseSdk), targetHash)
             ?: error("Cannot resolve base platform dir for ${baseSdk.name}")
         val baseAndroidJar = basePlatformDir.resolve(ANDROID_JAR_NAME)
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(CACHE_SCHEMA_VERSION.toByteArray())
+        digest.update(viewPreference.storageValue.toByteArray())
         digest.update(baseSdk.sdkType.name.toByteArray())
         digest.update(baseSdk.homePath.orEmpty().toByteArray())
         digest.update(targetHash.orEmpty().toByteArray())
         digest.update(Files.size(baseAndroidJar).toString().toByteArray())
         digest.update(Files.getLastModifiedTime(baseAndroidJar).toMillis().toString().toByteArray())
+        updateSourceRootsDigest(digest, baseSdk)
         Files.newInputStream(frameworkJarPath).use { input ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
@@ -348,9 +516,11 @@ class FrameworkSdkOverlayService(private val project: Project) {
         baseAndroidJar: Path,
         frameworkJarPath: Path,
         targetHash: String?,
+        viewPreference: FrameworkViewPreference,
     ): String {
         return buildString {
             appendLine("schema=$CACHE_SCHEMA_VERSION")
+            appendLine("viewPreference=${viewPreference.storageValue}")
             appendLine("baseSdk=${baseSdk.name}")
             appendLine("baseHome=${baseSdk.homePath.orEmpty()}")
             appendLine("platformDir=$basePlatformDir")
@@ -358,15 +528,50 @@ class FrameworkSdkOverlayService(private val project: Project) {
             appendLine("baseAndroidJar=$baseAndroidJar")
             appendLine("baseAndroidJarSize=${Files.size(baseAndroidJar)}")
             appendLine("baseAndroidJarMtime=${Files.getLastModifiedTime(baseAndroidJar).toMillis()}")
+            sourceRootStateLines(baseSdk).forEach(::appendLine)
             appendLine("frameworkJar=$frameworkJarPath")
             appendLine("frameworkJarSize=${Files.size(frameworkJarPath)}")
             appendLine("frameworkJarMtime=${Files.getLastModifiedTime(frameworkJarPath).toMillis()}")
         }
     }
 
+    private fun updateSourceRootsDigest(
+        digest: MessageDigest,
+        baseSdk: Sdk,
+    ) {
+        sourceRootStateLines(baseSdk)
+            .sorted()
+            .forEach { line ->
+                digest.update(line.toByteArray())
+            }
+    }
+
+    private fun sourceRootStateLines(baseSdk: Sdk): List<String> {
+        val baseHome = baseSdk.homePath?.let(Path::of)?.normalize() ?: return emptyList()
+        return baseSdk.rootProvider.getFiles(OrderRootType.SOURCES)
+            .mapNotNull { root ->
+                val localPath = rootLocalPath(root)?.normalize() ?: return@mapNotNull null
+                if (!localPath.startsWith(baseHome)) {
+                    return@mapNotNull null
+                }
+                val kind = if (root.fileSystem is JarFileSystem) "jar" else "dir"
+                val exists = Files.exists(localPath)
+                val size = if (exists && Files.isRegularFile(localPath)) Files.size(localPath) else -1L
+                val modifiedTime = if (exists) Files.getLastModifiedTime(localPath).toMillis() else -1L
+                "sourceRoot=$kind|${localPath}|$size|$modifiedTime"
+            }
+    }
+
     private fun deduplicateRoots(roots: List<VirtualFile>): List<VirtualFile> {
         val seen = linkedSetOf<String>()
         return roots.filter { seen.add(it.url) }
+    }
+
+    private fun validateFrameworkFirstOverlay(mergedAndroidJar: Path) {
+        val validation = FrameworkOverlayValidator.validateFrameworkFirstJar(mergedAndroidJar)
+        if (validation.isNotEmpty()) {
+            error("Framework-first validation failed: ${validation.joinToString("; ")}")
+        }
     }
 
     private fun cleanupStaleOverlaySdks() {
@@ -403,6 +608,16 @@ class FrameworkSdkOverlayService(private val project: Project) {
 
     private fun isManagedOverlaySdk(sdk: Sdk): Boolean {
         return MANAGED_SDK_NAME_REGEX.matches(sdk.name)
+    }
+
+    private fun managedOverlayMode(sdk: Sdk): FrameworkViewPreference? {
+        val match = MANAGED_SDK_NAME_REGEX.find(sdk.name) ?: return null
+        val tag = match.groups[1]?.value ?: return FrameworkViewPreference.SDK_FIRST
+        return when (tag) {
+            FrameworkViewPreference.SDK_FIRST.sdkTag -> FrameworkViewPreference.SDK_FIRST
+            FrameworkViewPreference.FRAMEWORK_FIRST.sdkTag -> FrameworkViewPreference.FRAMEWORK_FIRST
+            else -> null
+        }
     }
 
     private fun isStaleOverlaySdk(sdk: Sdk, managedCacheRoot: Path): Boolean {
@@ -534,12 +749,12 @@ class FrameworkSdkOverlayService(private val project: Project) {
     }
 
     private companion object {
-        val FINGERPRINT_SUFFIX_REGEX = Regex(""" \[framework-first:[0-9a-f]{8}]$""")
-        val MANAGED_SDK_NAME_REGEX = Regex(""".+ \[framework-first:[0-9a-f]{8}]$""")
+        val MANAGED_SDK_SUFFIX_REGEX = Regex(""" \[framework-first(?:(?:\:sdk|\:fw))?:[0-9a-f]{8}]$""")
+        val MANAGED_SDK_NAME_REGEX = Regex(""".+ \[framework-first(?::(sdk|fw))?:[0-9a-f]{8}]$""")
         val CACHE_TTL: Duration = Duration.ofDays(30)
         const val LEGACY_SDK_SUFFIX = " [framework-first]"
         const val LEGACY_PROJECT_CACHE_DIR = ".framework-first-sdk"
-        const val CACHE_SCHEMA_VERSION = "5"
+        const val CACHE_SCHEMA_VERSION = "6"
         const val CACHE_ROOT_DIR = "Framework-First/cache"
         const val ANDROID_JAR_NAME = "android.jar"
         const val STAMP_FILE_NAME = ".stamp"
@@ -547,6 +762,16 @@ class FrameworkSdkOverlayService(private val project: Project) {
         const val MERGE_REPORT_FILE_NAME = ".merge-report.txt"
         const val MERGE_REPORT_SAMPLE_LIMIT = 10
         const val SHORT_HASH_LENGTH = 8
+        const val CLASS_FILE_SUFFIX = ".class"
+        const val META_INF_PREFIX = "META-INF/"
+        val EXCLUDED_FRAMEWORK_PREFIXES = listOf(
+            "java/",
+            "javax/",
+            "kotlin/",
+            "sun/",
+            "libcore/",
+            "org/apache/harmony/",
+        )
     }
 
     data class PreparedOverlaySpec(
@@ -555,5 +780,6 @@ class FrameworkSdkOverlayService(private val project: Project) {
         val overlayHome: Path,
         val platformDirName: String,
         val targetHash: String?,
+        val viewPreference: FrameworkViewPreference,
     )
 }

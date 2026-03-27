@@ -13,6 +13,7 @@ import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
+import java.awt.Dimension
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -20,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.jar.JarFile
 import javax.swing.JButton
+import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -36,6 +38,7 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
     private var panel: JPanel? = null
     private lateinit var pathField: TextFieldWithBrowseButton
     private lateinit var resetButton: JButton
+    private lateinit var viewPreferenceComboBox: JComboBox<FrameworkViewPreference>
     private lateinit var warningLabel: JLabel
     private lateinit var statusValueLabel: JLabel
     private lateinit var androidFacetModuleCountValueLabel: JLabel
@@ -56,6 +59,7 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
                 )
             }
             resetButton = JButton("Reset")
+            viewPreferenceComboBox = JComboBox(FrameworkViewPreference.entries.toTypedArray())
             warningLabel = JLabel().apply {
                 foreground = JBColor.ORANGE
                 horizontalAlignment = SwingConstants.LEFT
@@ -72,25 +76,29 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
 
             val content = JPanel(GridBagLayout())
             var row = 0
-            content.add(
-                JLabel("Project: ${project.basePath ?: project.name}"),
-                constraints(row = row++, left = 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0),
-            )
-            content.add(
-                JLabel("framework.jar path"),
-                constraints(row = row++, left = 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0),
-            )
-            content.add(
-                pathRow,
-                constraints(row = row++, left = 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0),
-            )
+            addInfoRow(content, row++, "Framework Jar Path", pathRow)
+            addInfoRow(content, row++, "API Lookup Priority", viewPreferenceComboBox)
             content.add(
                 warningLabel,
-                constraints(row = row++, left = 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0),
+                GridBagConstraints().apply {
+                    gridx = 1
+                    gridy = row++
+                    weightx = 1.0
+                    fill = GridBagConstraints.HORIZONTAL
+                    anchor = GridBagConstraints.NORTHWEST
+                    insets = Insets(0, 0, 12, 0)
+                },
             )
             content.add(
                 createInfoGrid(),
-                constraints(row = row, left = 0, fill = GridBagConstraints.HORIZONTAL, weightX = 1.0),
+                GridBagConstraints().apply {
+                    gridx = 0
+                    gridy = row
+                    gridwidth = 2
+                    weightx = 1.0
+                    fill = GridBagConstraints.HORIZONTAL
+                    anchor = GridBagConstraints.NORTHWEST
+                },
             )
 
             panel = JPanel(BorderLayout()).apply {
@@ -104,6 +112,9 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
                     override fun changedUpdate(e: DocumentEvent?) = updateUiState()
                 },
             )
+            viewPreferenceComboBox.addActionListener {
+                updateUiState()
+            }
             resetButton.addActionListener {
                 pathField.text = autoDetectedText()
                 updateUiState()
@@ -114,7 +125,9 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
     }
 
     override fun isModified(): Boolean {
-        return pendingCustomFrameworkJar() != stateService.settings().customFrameworkJar
+        val settings = stateService.settings()
+        return pendingCustomFrameworkJar() != settings.customFrameworkJar ||
+            selectedViewPreference() != settings.viewPreference
     }
 
     override fun apply() {
@@ -128,6 +141,7 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         }
 
         stateService.setCustomFrameworkJar(pendingCustomPath)
+        stateService.setViewPreference(selectedViewPreference())
         if (overlayService.isProjectEnabled()) {
             overlayService.syncOverlay("settings-apply")
         }
@@ -137,6 +151,7 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
     override fun reset() {
         val config = FrameworkOverlayConfigLoader.load(project)
         pathField.text = currentFieldText(config)
+        viewPreferenceComboBox.selectedItem = config.viewPreference
         updateUiState()
     }
 
@@ -148,31 +163,41 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         val config = FrameworkOverlayConfigLoader.load(project)
         val pendingCustomPath = pendingCustomFrameworkJar()
         val resolvedCustomPath = resolveConfiguredPath(pendingCustomPath)
+        val appliedViewPreference = config.viewPreference
         val androidFacetModules = FrameworkProjectUtil.androidFacetModules(project)
         resetButton.isEnabled = pendingCustomPath != null
 
-        warningLabel.text = buildWarningMessage(config, pendingCustomPath, resolvedCustomPath)
-        statusValueLabel.text = buildStatusValue(config, pendingCustomPath, resolvedCustomPath)
+        warningLabel.text = buildWarningMessage(
+            config,
+            pendingCustomPath,
+            resolvedCustomPath,
+            appliedViewPreference,
+        )
+        statusValueLabel.text = buildStatusValue(
+            config,
+            appliedViewPreference,
+        )
         androidFacetModuleCountValueLabel.text = androidFacetModules.size.toString()
-        overlayModuleCountValueLabel.text = overlayModuleCount(androidFacetModules).toString()
+        overlayModuleCountValueLabel.text = overlayModuleCount(androidFacetModules, appliedViewPreference).toString()
         baseSdkValueLabel.text = baseSdkNames(androidFacetModules).ifEmpty { "Not resolved" }
     }
 
     private fun buildStatusValue(
         config: FrameworkOverlayConfig,
-        pendingCustomPath: String?,
-        resolvedCustomPath: Path?,
+        appliedViewPreference: FrameworkViewPreference,
     ): String {
         val enabledPart = if (stateService.isEnabled()) "Enabled" else "Disabled"
-        val effectivePath = resolvedCustomPath ?: if (pendingCustomPath == null) config.autoDetectedFrameworkJar else null
+        val effectivePath = config.frameworkJar ?: config.autoDetectedFrameworkJar
         val readinessPart = if (effectivePath != null) "Ready" else "Unresolved"
-        return "$enabledPart · $readinessPart"
+        val modePart = appliedViewPreference.displayName
+        return "$enabledPart · $readinessPart · $modePart"
     }
 
     private fun buildWarningMessage(
         config: FrameworkOverlayConfig,
         pendingCustomPath: String?,
         resolvedCustomPath: Path?,
+        appliedViewPreference: FrameworkViewPreference,
     ): String {
         if (pendingCustomPath != null) {
             if (resolvedCustomPath == null) {
@@ -185,13 +210,29 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
             if (autoDetected != null && autoDetected != resolvedCustomPath.normalize()) {
                 return "Custom path differs from auto-detected path; IDE insight may differ from Gradle compile classpath."
             }
-            return ""
+            return modeStatusWarning(config, appliedViewPreference)
         }
         return if (config.autoDetectedFrameworkJar == null) {
             "Auto-detected framework.jar not found."
         } else {
-            ""
+            modeStatusWarning(config, appliedViewPreference)
         }
+    }
+
+    private fun modeStatusWarning(
+        config: FrameworkOverlayConfig,
+        selectedViewPreference: FrameworkViewPreference,
+    ): String {
+        if (!stateService.isEnabled()) {
+            return ""
+        }
+        if (selectedViewPreference == FrameworkViewPreference.FRAMEWORK_FIRST &&
+            config.frameworkJar != null &&
+            overlayModuleCount(FrameworkProjectUtil.androidFacetModules(project), selectedViewPreference) == 0
+        ) {
+            return "Framework implementation overlay is unavailable for the current project."
+        }
+        return ""
     }
 
     private fun autoDetectedText(config: FrameworkOverlayConfig = FrameworkOverlayConfigLoader.load(project)): String {
@@ -215,6 +256,10 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
             return null
         }
         return currentText
+    }
+
+    private fun selectedViewPreference(): FrameworkViewPreference {
+        return (viewPreferenceComboBox.selectedItem as? FrameworkViewPreference) ?: FrameworkViewPreference.SDK_FIRST
     }
 
     private fun resolveConfiguredPath(rawValue: String?): Path? {
@@ -256,9 +301,14 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         }
     }
 
-    private fun overlayModuleCount(androidFacetModules: List<com.intellij.openapi.module.Module>): Int {
+    private fun overlayModuleCount(
+        androidFacetModules: List<com.intellij.openapi.module.Module>,
+        viewPreference: FrameworkViewPreference,
+    ): Int {
         return androidFacetModules.count { module ->
-            ModuleRootManager.getInstance(module).sdk?.let(sdkOverlayService::isUsableManagedOverlaySdk) == true
+            ModuleRootManager.getInstance(module).sdk?.let { sdk ->
+                sdkOverlayService.isUsableManagedOverlaySdk(sdk, viewPreference)
+            } == true
         }
     }
 
@@ -276,8 +326,8 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         val grid = JPanel(GridBagLayout())
         var row = 0
         addInfoRow(grid, row++, "Status", statusValueLabel)
-        addInfoRow(grid, row++, "AndroidFacet modules", androidFacetModuleCountValueLabel)
-        addInfoRow(grid, row++, "Overlay modules", overlayModuleCountValueLabel)
+        addInfoRow(grid, row++, "AndroidFacet Modules", androidFacetModuleCountValueLabel)
+        addInfoRow(grid, row++, "Overlay Modules", overlayModuleCountValueLabel)
         addInfoRow(grid, row, "Base SDKs", baseSdkValueLabel)
         return grid
     }
@@ -288,13 +338,17 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         label: String,
         value: JComponent,
     ) {
+        val labelComponent = JLabel(label).apply {
+            preferredSize = Dimension(JBUI.scale(LABEL_COLUMN_WIDTH), preferredSize.height)
+            minimumSize = preferredSize
+        }
         panel.add(
-            JLabel(label),
+            labelComponent,
             GridBagConstraints().apply {
                 gridx = 0
                 gridy = row
-                anchor = GridBagConstraints.NORTHWEST
-                insets = Insets(0, 0, 6, 12)
+                anchor = GridBagConstraints.WEST
+                insets = Insets(2, 0, 10, 16)
             },
         )
         panel.add(
@@ -304,8 +358,8 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
                 gridy = row
                 weightx = 1.0
                 fill = GridBagConstraints.HORIZONTAL
-                anchor = GridBagConstraints.NORTHWEST
-                insets = Insets(0, 0, 6, 0)
+                anchor = GridBagConstraints.WEST
+                insets = Insets(0, 0, 10, 0)
             },
         )
     }
@@ -318,24 +372,9 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
         }
     }
 
-    private fun constraints(
-        row: Int,
-        left: Int,
-        fill: Int,
-        weightX: Double,
-    ): GridBagConstraints {
-        return GridBagConstraints().apply {
-            gridx = 0
-            gridy = row
-            this.fill = fill
-            this.weightx = weightX
-            anchor = GridBagConstraints.NORTHWEST
-            insets = Insets(0, left, 8, 0)
-        }
-    }
-
     companion object {
         const val ID = "com.lenovo.tools.frameworkfirst.project"
+        const val LABEL_COLUMN_WIDTH = 170
         private val KNOWN_PLATFORM_CLASSES = listOf(
             "android/os/Build.class",
             "android/view/View.class",

@@ -110,8 +110,8 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
         label.toolTipText = buildTooltip(
             enabled = stateService.isEnabled(),
             frameworkJar = config.frameworkJar,
-            discoverySource = config.discoverySource,
             hasAndroidModules = hasAndroidModules,
+            viewPreference = config.viewPreference,
         )
     }
 
@@ -161,15 +161,16 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
     private fun buildTooltip(
         enabled: Boolean,
         frameworkJar: java.nio.file.Path?,
-        discoverySource: String?,
         hasAndroidModules: Boolean,
+        viewPreference: FrameworkViewPreference,
     ): String {
         val status = if (enabled) "Enabled" else "Disabled"
-        val framework = frameworkJar?.toString() ?: "framework.jar not found"
-        val source = discoverySource?.let { " ($it)" }.orEmpty()
-        val androidState = if (hasAndroidModules) "AndroidFacet modules detected" else "No AndroidFacet module yet"
-        val mode = if (FrameworkOverlayConfigLoader.load(project).hasCustomFrameworkOverride) "Custom override" else "Auto"
-        return "Framework-First: $status\nMode: $mode\n$androidState\n$framework$source"
+        val issue = when {
+            frameworkJar == null -> " · framework.jar not found"
+            !hasAndroidModules -> " · no AndroidFacet modules"
+            else -> ""
+        }
+        return "Framework-First · $status · ${viewPreference.displayName}$issue"
     }
 
     private companion object {

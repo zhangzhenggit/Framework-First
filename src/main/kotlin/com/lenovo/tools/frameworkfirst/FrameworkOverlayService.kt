@@ -84,6 +84,9 @@ class FrameworkOverlayService(private val project: Project) {
                             project,
                             "Framework-First skipped: ${throwable.message ?: throwable.javaClass.simpleName}",
                         )
+                        if (request.viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
+                            disableOverlay()
+                        }
                         finishRequest(request.key, applied = false)
                         return
                     }
@@ -98,6 +101,9 @@ class FrameworkOverlayService(private val project: Project) {
                             project,
                             "Framework-First skipped: ${error.message ?: error.javaClass.simpleName}",
                         )
+                        if (request.viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
+                            disableOverlay()
+                        }
                     }
                     finishRequest(request.key, applied = false)
                 }
@@ -115,7 +121,8 @@ class FrameworkOverlayService(private val project: Project) {
             return null
         }
 
-        val frameworkJar = FrameworkOverlayConfigLoader.load(project).frameworkJar
+        val config = FrameworkOverlayConfigLoader.load(project)
+        val frameworkJar = config.frameworkJar
         if (frameworkJar == null || !Files.isRegularFile(frameworkJar)) {
             return null
         }
@@ -141,8 +148,8 @@ class FrameworkOverlayService(private val project: Project) {
             return null
         }
 
-        val requestKey = buildRequestKey(frameworkJar, moduleTargets)
-        if (isAlreadyApplied(requestKey, moduleTargets, sdkOverlayService)) {
+        val requestKey = buildRequestKey(frameworkJar, config.viewPreference, moduleTargets)
+        if (isAlreadyApplied(requestKey, config.viewPreference, moduleTargets, sdkOverlayService)) {
             return null
         }
 
@@ -150,12 +157,14 @@ class FrameworkOverlayService(private val project: Project) {
             trigger = trigger,
             key = requestKey,
             frameworkJar = frameworkJar,
+            viewPreference = config.viewPreference,
             moduleTargets = moduleTargets,
         )
     }
 
     private fun buildRequestKey(
         frameworkJar: java.nio.file.Path,
+        viewPreference: FrameworkViewPreference,
         moduleTargets: List<ModuleTarget>,
     ): String {
         val jarState = buildString {
@@ -164,6 +173,8 @@ class FrameworkOverlayService(private val project: Project) {
             append(runCatching { Files.size(frameworkJar) }.getOrDefault(-1L))
             append('|')
             append(runCatching { Files.getLastModifiedTime(frameworkJar).toMillis() }.getOrDefault(-1L))
+            append('|')
+            append(viewPreference.storageValue)
         }
         val moduleState = moduleTargets
             .sortedBy { it.module.name }
@@ -175,6 +186,7 @@ class FrameworkOverlayService(private val project: Project) {
 
     private fun isAlreadyApplied(
         requestKey: String,
+        viewPreference: FrameworkViewPreference,
         moduleTargets: List<ModuleTarget>,
         sdkOverlayService: FrameworkSdkOverlayService,
     ): Boolean {
@@ -185,7 +197,7 @@ class FrameworkOverlayService(private val project: Project) {
         }
 
         return moduleTargets.all { target ->
-            sdkOverlayService.isUsableManagedOverlaySdk(target.currentSdk)
+            sdkOverlayService.isUsableManagedOverlaySdk(target.currentSdk, viewPreference)
         }
     }
 
@@ -221,11 +233,15 @@ class FrameworkOverlayService(private val project: Project) {
             indicator.fraction = index.toDouble() / totalTargets.toDouble()
             indicator.text2 = target.baseSdk.name
 
-            val overlayKey = overlayKey(target.baseSdk)
+            val overlayKey = overlayKey(target.baseSdk, request.viewPreference)
             preparedByKey.getOrPut(overlayKey) {
                 runCatching {
                     PreparedResult.Prepared(
-                        sdkOverlayService.prepareOverlay(target.baseSdk, request.frameworkJar),
+                        sdkOverlayService.prepareOverlay(
+                            target.baseSdk,
+                            request.frameworkJar,
+                            request.viewPreference,
+                        ),
                     )
                 }.getOrElse { throwable ->
                     logger.warn("Failed to prepare overlay SDK for ${target.baseSdk.name}", throwable)
@@ -253,12 +269,15 @@ class FrameworkOverlayService(private val project: Project) {
 
             val sdkOverlayService = project.getService(FrameworkSdkOverlayService::class.java)
             var appliedAny = false
+            var hadFailure = false
             WriteAction.runAndWait<RuntimeException> {
                 removeLegacyProjectLibrary(preparedRequest.request.moduleTargets.map { it.module })
                 sdkOverlayService.cleanupSdkDefinitions()
 
                 preparedRequest.request.moduleTargets.forEach { target ->
-                    when (val prepared = preparedRequest.preparedByKey[overlayKey(target.baseSdk)]) {
+                    when (val prepared = preparedRequest.preparedByKey[
+                        overlayKey(target.baseSdk, preparedRequest.request.viewPreference)
+                    ]) {
                         is PreparedResult.Prepared -> {
                             val overlaySdk = sdkOverlayService.applyPreparedOverlay(prepared.spec)
                             if (ModuleRootManager.getInstance(target.module).sdk?.name != overlaySdk.name) {
@@ -268,6 +287,7 @@ class FrameworkOverlayService(private val project: Project) {
                         }
 
                         is PreparedResult.Failed -> {
+                            hadFailure = true
                             FrameworkNotifier.warning(
                                 project,
                                 "Framework-First skipped ${prepared.baseSdkName}: ${prepared.reason}",
@@ -282,8 +302,10 @@ class FrameworkOverlayService(private val project: Project) {
             if (appliedAny) {
                 PsiManager.getInstance(project).dropPsiCaches()
                 DaemonCodeAnalyzer.getInstance(project).restart(project)
+            } else if (hadFailure && preparedRequest.request.viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
+                disableOverlay()
             }
-            finishRequest(preparedRequest.request.key, applied = true)
+            finishRequest(preparedRequest.request.key, applied = appliedAny)
         }
     }
 
@@ -336,8 +358,11 @@ class FrameworkOverlayService(private val project: Project) {
         }
     }
 
-    private fun overlayKey(baseSdk: Sdk): String {
-        return baseSdk.name + "|" + baseSdk.sdkType.name
+    private fun overlayKey(
+        baseSdk: Sdk,
+        viewPreference: FrameworkViewPreference,
+    ): String {
+        return baseSdk.name + "|" + baseSdk.sdkType.name + "|" + viewPreference.storageValue
     }
 
     private fun targetModules(): List<Module> {
@@ -372,6 +397,7 @@ class FrameworkOverlayService(private val project: Project) {
         val trigger: String,
         val key: String,
         val frameworkJar: java.nio.file.Path,
+        val viewPreference: FrameworkViewPreference,
         val moduleTargets: List<ModuleTarget>,
     )
 
