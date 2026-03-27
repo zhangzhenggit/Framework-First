@@ -19,6 +19,12 @@
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="Framework-First" displayType="BALLOON" isLogByDefault="true"/>
         <postStartupActivity implementation="com.lenovo.tools.frameworkfirst.FrameworkOverlayStartupActivity"/>
+        <statusBarWidgetFactory implementation="com.lenovo.tools.frameworkfirst.FrameworkStatusBarWidgetFactory"/>
+        <projectConfigurable
+                id="com.lenovo.tools.frameworkfirst.project"
+                parentId="tools"
+                displayName="Framework-First"
+                instance="com.lenovo.tools.frameworkfirst.FrameworkProjectConfigurable"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.android.gradle.sync">

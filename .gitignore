@@ -1,4 +1,5 @@
 /build/
+/build-plugin.log
 /.gradle/
 /.gradle-home*/
 /.idea/

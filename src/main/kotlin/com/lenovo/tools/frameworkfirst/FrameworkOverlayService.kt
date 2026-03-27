@@ -9,7 +9,6 @@ import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.module.Module
-import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.projectRoots.Sdk
 import com.intellij.openapi.roots.LibraryOrderEntry
@@ -17,7 +16,6 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.ModuleRootModificationUtil
 import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 import com.intellij.psi.PsiManager
-import org.jetbrains.android.facet.AndroidFacet
 import java.nio.file.Files
 
 @Service(Service.Level.PROJECT)
@@ -27,6 +25,30 @@ class FrameworkOverlayService(private val project: Project) {
     private var runningRequestKey: String? = null
     private var lastAppliedRequestKey: String? = null
     private var rescheduleRequested: Boolean = false
+
+    fun isProjectEnabled(): Boolean {
+        return project.getService(FrameworkProjectStateService::class.java).isEnabled()
+    }
+
+    fun setProjectEnabled(enabled: Boolean) {
+        val stateService = project.getService(FrameworkProjectStateService::class.java)
+        if (stateService.isEnabled() == enabled) {
+            return
+        }
+
+        stateService.setEnabled(enabled)
+        if (enabled) {
+            val config = FrameworkOverlayConfigLoader.load(project)
+            if (config.frameworkJar == null) {
+                FrameworkNotifier.warning(project, "Framework-First skipped: framework.jar not found")
+                return
+            }
+            syncOverlay("manual-enable")
+            return
+        }
+
+        disableOverlay()
+    }
 
     fun syncOverlay(trigger: String) {
         val request = buildRequest(trigger) ?: return
@@ -85,6 +107,11 @@ class FrameworkOverlayService(private val project: Project) {
 
     private fun buildRequest(trigger: String): OverlayRequest? {
         if (project.isDisposed) {
+            return null
+        }
+
+        val stateService = project.getService(FrameworkProjectStateService::class.java)
+        if (!stateService.isEnabled()) {
             return null
         }
 
@@ -219,6 +246,10 @@ class FrameworkOverlayService(private val project: Project) {
                 finishRequest(preparedRequest.request.key, applied = false)
                 return@invokeLater
             }
+            if (!project.getService(FrameworkProjectStateService::class.java).isEnabled()) {
+                finishRequest(preparedRequest.request.key, applied = false)
+                return@invokeLater
+            }
 
             val sdkOverlayService = project.getService(FrameworkSdkOverlayService::class.java)
             var appliedAny = false
@@ -256,6 +287,37 @@ class FrameworkOverlayService(private val project: Project) {
         }
     }
 
+    private fun disableOverlay() {
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) {
+                return@invokeLater
+            }
+
+            val sdkOverlayService = project.getService(FrameworkSdkOverlayService::class.java)
+            var revertedAny = false
+            WriteAction.runAndWait<RuntimeException> {
+                removeLegacyProjectLibrary(targetModules())
+                targetModules().forEach { module ->
+                    val currentSdk = ModuleRootManager.getInstance(module).sdk ?: return@forEach
+                    val baseSdk = sdkOverlayService.resolveBaseSdk(currentSdk)
+                    if (currentSdk.name != baseSdk.name) {
+                        ModuleRootModificationUtil.setModuleSdk(module, baseSdk)
+                        revertedAny = true
+                    }
+                }
+                sdkOverlayService.cleanupSdkDefinitions()
+            }
+
+            synchronized(stateLock) {
+                lastAppliedRequestKey = null
+            }
+            if (revertedAny) {
+                PsiManager.getInstance(project).dropPsiCaches()
+                DaemonCodeAnalyzer.getInstance(project).restart(project)
+            }
+        }
+    }
+
     private fun finishRequest(requestKey: String, applied: Boolean) {
         val shouldReschedule = synchronized(stateLock) {
             if (runningRequestKey == requestKey) {
@@ -279,9 +341,7 @@ class FrameworkOverlayService(private val project: Project) {
     }
 
     private fun targetModules(): List<Module> {
-        return ModuleManager.getInstance(project).modules.filter { module ->
-            !module.isDisposed && AndroidFacet.getInstance(module) != null
-        }
+        return FrameworkProjectUtil.androidFacetModules(project)
     }
 
     private fun removeLegacyProjectLibrary(modules: List<Module>) {

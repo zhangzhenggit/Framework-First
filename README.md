@@ -25,14 +25,23 @@
   项目打开后重放 overlay
 - `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkOverlaySyncStep.kt`
   Gradle Sync 后重放 overlay
+- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkProjectStateService.kt`
+  维护当前工程的启用状态和自定义路径配置，状态落插件侧配置，不写目标工程
+- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkStatusBarWidgetFactory.kt`
+  提供右下角状态栏开关，只针对当前工程开启或关闭
+- `src/main/kotlin/com/lenovo/tools/frameworkfirst/FrameworkProjectConfigurable.kt`
+  提供当前工程的 `Settings` 页，可在自动发现和自定义 `framework.jar` 路径之间切换
 
 ## 当前约束
 
-- 当前版本默认只识别项目根目录下的 `.common_libs/framework.jar`
+- 当前版本优先识别项目根目录下的 `.common_libs/framework.jar`
+- 如果默认路径不存在，会继续尝试从 Gradle 文件和项目内搜索自动发现 `framework.jar`
+- 如果用户在 `Settings` 页里配置了自定义路径，则优先使用自定义路径
 - 不在目标工程目录生成配置文件
 - 运行时缓存不落目标工程根目录，而是落 IDE system cache
 - 当前发布策略只声明支持 Android Studio `253.*`
 - `framework.jar` 只用于补充官方 SDK 中缺失的 Android 平台成员，不会覆盖 `java.* / libcore` 这层标准类型系统
+- 只对带 `AndroidFacet` 的模块参与 overlay；普通 Java/Kotlin 模块不会参与
 
 ## 缓存策略
 
@@ -49,6 +58,18 @@
 - 不会在目标工程根目录生成 `.framework-first-sdk`
 - overlay 使用的是 merged `android.jar`，能减少“hidden API 修好了，但标准 SDK 反而出现假红”的问题
 - 每份 merged cache 都会附带 `.merge-report.txt`，用于定位合并回退和冲突样本
+
+## 当前工程开关
+
+- 状态栏右下角会显示 `Framework-First` 开关图标
+- 点击后只提供当前工程级 `Enable / Disable`
+- 同一个弹窗里可以直接进入 `Configure Framework Jar...`
+- 开关状态保存在 IDE 配置目录下的插件私有文件中，不写入目标工程
+- 关闭后，当前工程的 AndroidFacet 模块会切回 base SDK；开启后重新应用 overlay
+- `Settings | Tools | Framework-First` 提供单一路径输入框
+- 默认会展示当前生效路径：未自定义时显示自动发现路径，自定义后显示用户选择路径
+- `Reset` 会清除自定义覆盖并恢复到自动发现路径；如果自动发现为空，则恢复为空
+- 设置页会同时展示当前工程的基础信息，例如状态、AndroidFacet 模块数、Overlay 模块数和 base SDK
 
 ## 构建要求
 
