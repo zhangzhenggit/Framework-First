@@ -105,10 +105,15 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
     private fun updatePresentation() {
         val config = FrameworkOverlayConfigLoader.load(project)
         val hasAndroidModules = FrameworkProjectUtil.hasAndroidFacetModules(project)
-        label.isVisible = hasAndroidModules || config.frameworkJar != null
-        label.icon = if (stateService.isEnabled()) ENABLED_ICON else DISABLED_ICON
+        val widgetState = widgetState(config, hasAndroidModules)
+        label.isVisible = true
+        label.icon = when (widgetState) {
+            WidgetState.ACTIVE -> ENABLED_ICON
+            WidgetState.DISABLED -> DISABLED_ICON
+            WidgetState.UNAVAILABLE -> UNAVAILABLE_ICON
+        }
         label.toolTipText = buildTooltip(
-            enabled = stateService.isEnabled(),
+            widgetState = widgetState,
             frameworkJar = config.frameworkJar,
             hasAndroidModules = hasAndroidModules,
             viewPreference = config.viewPreference,
@@ -159,23 +164,45 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
     }
 
     private fun buildTooltip(
-        enabled: Boolean,
+        widgetState: WidgetState,
         frameworkJar: java.nio.file.Path?,
         hasAndroidModules: Boolean,
         viewPreference: FrameworkViewPreference,
     ): String {
-        val status = if (enabled) "Enabled" else "Disabled"
+        val status = when (widgetState) {
+            WidgetState.ACTIVE -> "Enabled"
+            WidgetState.DISABLED -> "Disabled"
+            WidgetState.UNAVAILABLE -> "Unavailable"
+        }
         val issue = when {
-            frameworkJar == null -> " · framework.jar not found"
             !hasAndroidModules -> " · no AndroidFacet modules"
+            frameworkJar == null -> " · framework.jar not found"
             else -> ""
         }
         return "Framework-First · $status · ${viewPreference.displayName}$issue"
+    }
+
+    private fun widgetState(
+        config: FrameworkOverlayConfig,
+        hasAndroidModules: Boolean,
+    ): WidgetState {
+        return when {
+            !stateService.isEnabled() -> WidgetState.DISABLED
+            !hasAndroidModules || config.frameworkJar == null -> WidgetState.UNAVAILABLE
+            else -> WidgetState.ACTIVE
+        }
     }
 
     private companion object {
         const val WIDGET_ID = "Framework-First.StatusBar"
         val ENABLED_ICON = IconLoader.getIcon("/icons/frameworkStatusBar.svg", FrameworkStatusBarWidgetFactory::class.java)
         val DISABLED_ICON = IconLoader.getIcon("/icons/frameworkStatusBar_off.svg", FrameworkStatusBarWidgetFactory::class.java)
+        val UNAVAILABLE_ICON = IconLoader.getIcon("/icons/frameworkStatusBar_unavailable.svg", FrameworkStatusBarWidgetFactory::class.java)
+    }
+
+    private enum class WidgetState {
+        ACTIVE,
+        DISABLED,
+        UNAVAILABLE,
     }
 }

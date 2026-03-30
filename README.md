@@ -76,7 +76,7 @@
 2. 重启 IDE 并重新打开工程
 3. 确认右下角出现 `Framework-First` 图标
 4. 默认直接使用 `Android SDK` 模式
-5. 如需查看 framework 实现，可在设置页把 `API Lookup Priority` 切到 `Framework JAR`
+5. 如需查看 framework 实现，可在设置页把 `Code Insight Base` 切到 `Framework JAR`
 
 设置页入口：
 
@@ -95,7 +95,7 @@
 - 自定义后，显示用户选择的路径
 - `Reset` 会清除自定义覆盖并恢复为自动发现路径
 
-### API Lookup Priority
+### Code Insight Base
 
 - `Android SDK`
 - `Framework JAR`

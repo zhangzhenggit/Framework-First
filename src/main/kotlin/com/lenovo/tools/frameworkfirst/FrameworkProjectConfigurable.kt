@@ -77,7 +77,7 @@ class FrameworkProjectConfigurable(private val project: Project) : SearchableCon
             val content = JPanel(GridBagLayout())
             var row = 0
             addInfoRow(content, row++, "Framework Jar Path", pathRow)
-            addInfoRow(content, row++, "API Lookup Priority", viewPreferenceComboBox)
+            addInfoRow(content, row++, "Code Insight Base", viewPreferenceComboBox)
             content.add(
                 warningLabel,
                 GridBagConstraints().apply {
