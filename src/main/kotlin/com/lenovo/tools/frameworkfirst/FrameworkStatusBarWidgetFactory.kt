@@ -65,6 +65,9 @@ private class FrameworkStatusBarWidget(private val project: Project) : CustomSta
         stateService.addListener(this) {
             refresh()
         }
+        overlayService.addListener(this) {
+            refresh()
+        }
         label.addMouseListener(
             object : MouseAdapter() {
                 override fun mousePressed(event: MouseEvent) {

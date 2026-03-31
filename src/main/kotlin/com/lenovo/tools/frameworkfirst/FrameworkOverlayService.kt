@@ -1,6 +1,7 @@
 package com.lenovo.tools.frameworkfirst
 
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
@@ -17,17 +18,27 @@ import com.intellij.openapi.roots.ModuleRootModificationUtil
 import com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 import com.intellij.psi.PsiManager
 import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
+import com.intellij.openapi.util.Disposer
 
 @Service(Service.Level.PROJECT)
 class FrameworkOverlayService(private val project: Project) {
     private val logger = Logger.getInstance(FrameworkOverlayService::class.java)
     private val stateLock = Any()
+    private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private var runningRequestKey: String? = null
     private var lastAppliedRequestKey: String? = null
     private var rescheduleRequested: Boolean = false
 
     fun isProjectEnabled(): Boolean {
         return project.getService(FrameworkProjectStateService::class.java).isEnabled()
+    }
+
+    fun addListener(parentDisposable: Disposable, listener: () -> Unit) {
+        listeners.add(listener)
+        Disposer.register(parentDisposable) {
+            listeners.remove(listener)
+        }
     }
 
     fun setProjectEnabled(enabled: Boolean) {
@@ -269,10 +280,18 @@ class FrameworkOverlayService(private val project: Project) {
 
             val sdkOverlayService = project.getService(FrameworkSdkOverlayService::class.java)
             var appliedAny = false
+            var revertedAny = false
             var hadFailure = false
             WriteAction.runAndWait<RuntimeException> {
-                removeLegacyProjectLibrary(preparedRequest.request.moduleTargets.map { it.module })
+                val allAndroidModules = allAndroidModules()
+                val targetModules = preparedRequest.request.moduleTargets.mapTo(linkedSetOf()) { it.module }
+                removeLegacyProjectLibrary(allAndroidModules)
                 sdkOverlayService.cleanupSdkDefinitions()
+                revertedAny = restoreExcludedModules(
+                    allAndroidModules = allAndroidModules,
+                    targetModules = targetModules,
+                    sdkOverlayService = sdkOverlayService,
+                )
 
                 preparedRequest.request.moduleTargets.forEach { target ->
                     when (val prepared = preparedRequest.preparedByKey[
@@ -299,7 +318,7 @@ class FrameworkOverlayService(private val project: Project) {
                 }
             }
 
-            if (appliedAny) {
+            if (appliedAny || revertedAny) {
                 PsiManager.getInstance(project).dropPsiCaches()
                 DaemonCodeAnalyzer.getInstance(project).restart(project)
             } else if (hadFailure && preparedRequest.request.viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
@@ -318,8 +337,9 @@ class FrameworkOverlayService(private val project: Project) {
             val sdkOverlayService = project.getService(FrameworkSdkOverlayService::class.java)
             var revertedAny = false
             WriteAction.runAndWait<RuntimeException> {
-                removeLegacyProjectLibrary(targetModules())
-                targetModules().forEach { module ->
+                val androidModules = allAndroidModules()
+                removeLegacyProjectLibrary(androidModules)
+                androidModules.forEach { module ->
                     val currentSdk = ModuleRootManager.getInstance(module).sdk ?: return@forEach
                     val baseSdk = sdkOverlayService.resolveBaseSdk(currentSdk)
                     if (currentSdk.name != baseSdk.name) {
@@ -337,6 +357,7 @@ class FrameworkOverlayService(private val project: Project) {
                 PsiManager.getInstance(project).dropPsiCaches()
                 DaemonCodeAnalyzer.getInstance(project).restart(project)
             }
+            notifyListeners()
         }
     }
 
@@ -356,6 +377,7 @@ class FrameworkOverlayService(private val project: Project) {
         if (shouldReschedule && !project.isDisposed) {
             syncOverlay("coalesced")
         }
+        notifyListeners()
     }
 
     private fun overlayKey(
@@ -366,7 +388,33 @@ class FrameworkOverlayService(private val project: Project) {
     }
 
     private fun targetModules(): List<Module> {
+        return FrameworkProjectUtil.overlayTargetModules(project)
+    }
+
+    private fun allAndroidModules(): List<Module> {
         return FrameworkProjectUtil.androidFacetModules(project)
+    }
+
+    private fun restoreExcludedModules(
+        allAndroidModules: List<Module>,
+        targetModules: Set<Module>,
+        sdkOverlayService: FrameworkSdkOverlayService,
+    ): Boolean {
+        var revertedAny = false
+        allAndroidModules
+            .filterNot(targetModules::contains)
+            .forEach { module ->
+                val currentSdk = ModuleRootManager.getInstance(module).sdk ?: return@forEach
+                if (!sdkOverlayService.isUsableManagedOverlaySdk(currentSdk)) {
+                    return@forEach
+                }
+                val baseSdk = sdkOverlayService.resolveBaseSdk(currentSdk)
+                if (currentSdk.name != baseSdk.name) {
+                    ModuleRootModificationUtil.setModuleSdk(module, baseSdk)
+                    revertedAny = true
+                }
+            }
+        return revertedAny
     }
 
     private fun removeLegacyProjectLibrary(modules: List<Module>) {
@@ -384,6 +432,12 @@ class FrameworkOverlayService(private val project: Project) {
             val tableModel = table.modifiableModel
             tableModel.removeLibrary(legacyLibrary)
             tableModel.commit()
+        }
+    }
+
+    private fun notifyListeners() {
+        listeners.forEach { listener ->
+            runCatching(listener)
         }
     }
 

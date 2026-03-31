@@ -12,6 +12,14 @@ object FrameworkProjectUtil {
         }
     }
 
+    fun overlayTargetModules(project: Project): List<Module> {
+        val androidModules = androidFacetModules(project)
+        val moduleNames = androidModules.mapTo(linkedSetOf(), Module::getName)
+        return androidModules.filter { module ->
+            !moduleNames.contains("${module.name}.main")
+        }
+    }
+
     fun hasAndroidFacetModules(project: Project): Boolean {
         return androidFacetModules(project).isNotEmpty()
     }

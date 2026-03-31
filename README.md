@@ -86,6 +86,21 @@
 
 - 右下角 `Framework-First` 图标
 
+## 安装后何时会生效
+
+插件不会实时监听所有文件变化，通常按下面规则理解：
+
+- 首次安装或升级插件后：重启 Android Studio
+- 工程 Gradle 配置变化后：执行一次 `Sync Project with Gradle Files`
+- `framework.jar` 内容替换但路径不变：先 `Sync`，不行再 `Disable -> Enable`
+- Android SDK 或 SDK sources 更新后：优先重启 IDE
+
+如果想强制当前工程重建 overlay，但不想重启 IDE，可使用：
+
+- 右下角 `Framework-First` 图标
+- 先点 `Disable for This Project`
+- 再点 `Enable for This Project`
+
 ## 设置项说明
 
 ### Framework Jar Path
@@ -175,6 +190,52 @@ $env:GRADLE_USER_HOME="$PWD\.gradle-home"
 - `Settings / Plugins / Install Plugin from Disk...`
 
 然后选择 zip 包并重启 IDE。
+
+## 验证示例
+
+如果你使用的是类似 `XuiSettings` 的工程，建议至少验证下面几类场景。
+
+### 1. 隐藏 API 消红
+
+可优先检查：
+
+- `Settings/src/com/android/settings/notification/modes/ZenModeOtherLinkPreferenceController.java`
+
+期望结果：
+
+- `android.service.notification.ZenPolicy` 相关字段、方法不再报红
+- 代码补全能看到 `framework.jar` 补进来的成员
+
+### 2. Android SDK 模式跳转
+
+设置：
+
+- `Code Insight Base = Android SDK`
+
+期望结果：
+
+- SDK 有源码时，优先跳原始 Android SDK source
+- SDK 没源码时，回退到原始 Android SDK class
+- SDK 没有该类或成员时，再回退到原始 `framework.jar`
+
+### 3. Framework JAR 模式跳转
+
+设置：
+
+- `Code Insight Base = Framework JAR`
+
+期望结果：
+
+- framework 已有的类，优先跳原始 `framework.jar` class
+- framework 没有的类，再回退到 SDK source / class
+- 切换模式后，路径显示和跳转目标随模式变化
+
+### 4. 运行配置不受影响
+
+期望结果：
+
+- 右上角 Android App `Run` 按钮可以正常运行
+- `Run/Debug Configurations` 不出现 `Please select Android SDK`
 
 ## 验证建议
 
