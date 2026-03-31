@@ -1,6 +1,7 @@
 package com.lenovo.tools.frameworkfirst
 
 import com.android.sdklib.IAndroidTarget
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
@@ -29,6 +30,8 @@ import java.util.zip.ZipEntry
 @Service(Service.Level.PROJECT)
 class FrameworkSdkOverlayService(private val project: Project) {
     private val logger = Logger.getInstance(FrameworkSdkOverlayService::class.java)
+    @Volatile
+    private var gcRunning: Boolean = false
 
     fun resolveBaseSdk(sdk: Sdk): Sdk {
         val table = ProjectJdkTable.getInstance()
@@ -88,6 +91,71 @@ class FrameworkSdkOverlayService(private val project: Project) {
         cleanupLegacyProjectCache()
     }
 
+    fun cleanupObsoleteSchemaCaches(activeOverlayHomes: Collection<Path>) {
+        val keepCacheEntries = activeOverlayHomes.mapNotNull { overlayHome ->
+            overlayHome.parent?.normalize()
+        }.toSet()
+        val archivedAny = if (keepCacheEntries.isNotEmpty()) {
+            archiveObsoleteSchemaCaches(keepCacheEntries)
+        } else {
+            false
+        }
+        if (archivedAny) {
+            cleanupSdkDefinitions()
+        }
+        deletePendingGcArtifactsAsync()
+    }
+
+    fun archiveObsoleteSchemaCaches(keepCacheEntries: Set<Path>): Boolean {
+        val currentSchemaRoot = currentSchemaCacheRoot().normalize()
+        if (!Files.isDirectory(currentSchemaRoot.parent)) {
+            return false
+        }
+        var archivedAny = false
+        Files.createDirectories(gcRoot())
+        Files.list(currentSchemaRoot.parent).use { entries ->
+            entries.filter(Files::isDirectory).forEach { entry ->
+                val normalizedEntry = entry.normalize()
+                if (normalizedEntry == currentSchemaRoot || normalizedEntry in keepCacheEntries) {
+                    return@forEach
+                }
+                val archivedPath = uniqueGcPath(entry.fileName.toString())
+                runCatching {
+                    Files.move(normalizedEntry, archivedPath)
+                }.onSuccess {
+                    archivedAny = true
+                }.onFailure { throwable ->
+                    logger.warn("Failed to archive obsolete Framework-First schema cache $normalizedEntry", throwable)
+                }
+            }
+        }
+        return archivedAny
+    }
+
+    fun hasPendingGcArtifacts(): Boolean {
+        val gcRoot = gcRoot()
+        if (!Files.isDirectory(gcRoot)) {
+            return false
+        }
+        Files.list(gcRoot).use { entries ->
+            return entries.anyMatch(Files::exists)
+        }
+    }
+
+    fun deletePendingGcArtifactsAsync() {
+        if (gcRunning) {
+            return
+        }
+        gcRunning = true
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                deletePendingGcArtifacts()
+            } finally {
+                gcRunning = false
+            }
+        }
+    }
+
     fun cleanupSdkDefinitions() {
         cleanupLegacyOverlaySdks()
         cleanupStaleOverlaySdks()
@@ -98,8 +166,31 @@ class FrameworkSdkOverlayService(private val project: Project) {
         expectedPreference: FrameworkViewPreference? = null,
     ): Boolean {
         return isManagedOverlaySdk(sdk) &&
-            !isStaleOverlaySdk(sdk, cacheRoot().normalize()) &&
+            !isStaleOverlaySdk(sdk, currentSchemaCacheRoot().normalize()) &&
             (expectedPreference == null || managedOverlayMode(sdk) == expectedPreference)
+    }
+
+    fun isExpectedManagedOverlaySdk(
+        sdk: Sdk,
+        baseSdk: Sdk,
+        frameworkJarPath: Path,
+        viewPreference: FrameworkViewPreference,
+    ): Boolean {
+        if (!isUsableManagedOverlaySdk(sdk, viewPreference)) {
+            return false
+        }
+        val currentHome = sdk.homePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { Path.of(it).normalize() }.getOrNull() }
+            ?: return false
+        val baseAdditionalData = AndroidSdkAdditionalData.from(baseSdk)
+        val targetHash = resolveTargetHash(baseSdk, baseAdditionalData)
+        val expectedFingerprint = buildFingerprint(baseSdk, frameworkJarPath, targetHash, viewPreference)
+        val expectedHome = currentSchemaCacheRoot().resolve(expectedFingerprint).resolve("sdk").normalize()
+        if (currentHome != expectedHome) {
+            return false
+        }
+        return Files.isRegularFile(currentHome.resolve("platforms").resolve(resolvePlatformDirName(baseSdk, baseAdditionalData, targetHash)).resolve(ANDROID_JAR_NAME))
     }
 
     private fun overlaySdkName(
@@ -224,6 +315,16 @@ class FrameworkSdkOverlayService(private val project: Project) {
             ?.takeIf(Files::isDirectory)
     }
 
+    private fun resolvePlatformDirName(
+        baseSdk: Sdk,
+        baseAdditionalData: AndroidSdkAdditionalData?,
+        targetHash: String?,
+    ): String {
+        return resolveBasePlatformDir(baseSdk, baseAdditionalData, targetHash)?.fileName?.toString()
+            ?: targetHash
+            ?: error("Cannot resolve platform directory name for ${baseSdk.name}")
+    }
+
     private fun resolveBaseTarget(
         baseSdk: Sdk,
         baseAdditionalData: AndroidSdkAdditionalData?,
@@ -243,7 +344,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
         fingerprint: String,
         viewPreference: FrameworkViewPreference,
     ): Path {
-        val cacheEntryRoot = cacheRoot().resolve(fingerprint)
+        val cacheEntryRoot = currentSchemaCacheRoot().resolve(fingerprint)
         val overlayHome = cacheEntryRoot.resolve("sdk")
         val overlayPlatformDir = overlayHome.resolve("platforms").resolve(basePlatformDir.fileName.toString())
         val baseAndroidJar = basePlatformDir.resolve(ANDROID_JAR_NAME)
@@ -259,7 +360,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
             viewPreference = viewPreference,
         )
 
-        cleanupExpiredCaches(cacheRoot(), keepFingerprint = fingerprint)
+        cleanupExpiredCaches(currentSchemaCacheRoot(), keepFingerprint = fingerprint)
 
         if (Files.isRegularFile(stampFile) &&
             Files.exists(mergedAndroidJar) &&
@@ -576,7 +677,7 @@ class FrameworkSdkOverlayService(private val project: Project) {
 
     private fun cleanupStaleOverlaySdks() {
         val table = ProjectJdkTable.getInstance()
-        val managedCacheRoot = cacheRoot().normalize()
+        val managedCacheRoot = currentSchemaCacheRoot().normalize()
         table.allJdks
             .filter(::isManagedOverlaySdk)
             .filter { sdk -> isStaleOverlaySdk(sdk, managedCacheRoot) }
@@ -748,14 +849,60 @@ class FrameworkSdkOverlayService(private val project: Project) {
         return Path.of(PathManager.getSystemPath()).resolve(CACHE_ROOT_DIR)
     }
 
+    private fun currentSchemaCacheRoot(): Path {
+        return cacheRoot().resolve("v$CACHE_SCHEMA_VERSION")
+    }
+
+    private fun gcRoot(): Path {
+        return Path.of(PathManager.getSystemPath()).resolve(GC_ROOT_DIR)
+    }
+
+    private fun uniqueGcPath(entryName: String): Path {
+        val gcRoot = gcRoot()
+        var attempt = 0
+        while (true) {
+            val suffix = if (attempt == 0) "" else "-$attempt"
+            val candidate = gcRoot.resolve("${System.currentTimeMillis()}-$entryName$suffix")
+            if (!Files.exists(candidate)) {
+                return candidate
+            }
+            attempt++
+        }
+    }
+
+    private fun deletePendingGcArtifacts() {
+        val gcRoot = gcRoot()
+        if (!Files.isDirectory(gcRoot)) {
+            return
+        }
+        Files.list(gcRoot).use { entries ->
+            entries.filter(Files::isDirectory).forEach { entry ->
+                runCatching { deleteDirectory(entry) }
+                    .onFailure { throwable ->
+                        logger.warn("Failed to delete Framework-First GC cache $entry", throwable)
+                    }
+            }
+        }
+        if (Files.isDirectory(gcRoot)) {
+            runCatching {
+                Files.list(gcRoot).use { entries ->
+                    if (!entries.findAny().isPresent) {
+                        Files.deleteIfExists(gcRoot)
+                    }
+                }
+            }
+        }
+    }
+
     private companion object {
         val MANAGED_SDK_SUFFIX_REGEX = Regex(""" \[framework-first(?:(?:\:sdk|\:fw))?:[0-9a-f]{8}]$""")
         val MANAGED_SDK_NAME_REGEX = Regex(""".+ \[framework-first(?::(sdk|fw))?:[0-9a-f]{8}]$""")
         val CACHE_TTL: Duration = Duration.ofDays(30)
         const val LEGACY_SDK_SUFFIX = " [framework-first]"
         const val LEGACY_PROJECT_CACHE_DIR = ".framework-first-sdk"
-        const val CACHE_SCHEMA_VERSION = "6"
+        const val CACHE_SCHEMA_VERSION = "7"
         const val CACHE_ROOT_DIR = "Framework-First/cache"
+        const val GC_ROOT_DIR = "Framework-First/gc"
         const val ANDROID_JAR_NAME = "android.jar"
         const val STAMP_FILE_NAME = ".stamp"
         const val ACCESS_FILE_NAME = ".last-access"

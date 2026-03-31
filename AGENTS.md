@@ -65,3 +65,5 @@ PR 建议包含：
 - `release/` 目录只保留一个当前版本包，命名为 `Framework-First-<version>.zip`。
 - 发布新版本前删除旧版本 ZIP，避免仓库持续膨胀。
 - 涉及 IDE 外部缓存或配置清理时，不要隐式处理；需要在文档或说明中明确告知。
+- `CACHE_SCHEMA_VERSION` 只在 overlay cache 语义真正变化时才提升；文案、图标、README、普通 UI 调整不要提升 schema。
+- 一旦某次版本提升了 `CACHE_SCHEMA_VERSION`，后续版本如果没有新的 cache 语义变化，应继续沿用这个新 schema，不能回退到旧 schema；否则用户跨版本升级时会错误复用旧 cache。

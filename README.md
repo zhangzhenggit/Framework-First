@@ -94,6 +94,7 @@
 - 工程 Gradle 配置变化后：执行一次 `Sync Project with Gradle Files`
 - `framework.jar` 内容替换但路径不变：先 `Sync`，不行再 `Disable -> Enable`
 - Android SDK 或 SDK sources 更新后：优先重启 IDE
+- 如果执行了 Android Studio 自带的 `Invalidate Caches and Restart`：插件会在启动或下一次 `Sync` 时检查当前工程的 overlay 是否仍然完整；如果当前工程对应的 cache / overlay SDK 已失效，只会重建当前工程需要的那一份 overlay
 
 如果想强制当前工程重建 overlay，但不想重启 IDE，可使用：
 
@@ -127,7 +128,7 @@
 
 通用路径形态：
 
-- `<IDE system>/Framework-First/cache/<fingerprint>/sdk`
+- `<IDE system>/Framework-First/cache/v<schema>/<fingerprint>/sdk`
 
 ### 2. IDE config
 
@@ -136,6 +137,14 @@
 通用路径形态：
 
 - `<IDE config>/Framework-First/project-state.properties`
+
+缓存目录按内部 cache schema 分命名空间管理。  
+当插件修改了 overlay cache 语义并提升 schema 后，会自动切到新的 cache 命名空间；旧 schema 的缓存会在首次成功应用新 overlay 后再清理。
+
+维护规则：
+
+- `CACHE_SCHEMA_VERSION` 只在 overlay cache 语义真正变化时才提升。
+- 如果某次版本已经提升了 schema，后续版本在没有新的 cache 语义变化时，应继续沿用这个新 schema，不能回退到旧 schema。
 
 ## 清理旧缓存
 

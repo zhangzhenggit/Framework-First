@@ -166,6 +166,7 @@ object AndroidJarMerger {
             }
 
             primaryNode.version = maxOf(primaryNode.version, secondaryNode.version)
+            primaryNode.access = mergeVisibilityAccess(primaryNode.access, secondaryNode.access)
             primaryNode.signature = primaryNode.signature ?: secondaryNode.signature
             primaryNode.sourceFile = primaryNode.sourceFile ?: secondaryNode.sourceFile
             primaryNode.sourceDebug = primaryNode.sourceDebug ?: secondaryNode.sourceDebug
@@ -248,16 +249,21 @@ object AndroidJarMerger {
         baseNode: ClassNode,
         frameworkNode: ClassNode,
     ): MergeCount {
-        val existingFields = baseNode.fields
-            .mapTo(linkedSetOf()) { field -> "${field.name}:${field.desc}" }
+        val existingFields = linkedMapOf<String, org.objectweb.asm.tree.FieldNode>()
+        baseNode.fields.forEach { field ->
+            existingFields["${field.name}:${field.desc}"] = field
+        }
         var added = 0
         var duplicates = 0
         frameworkNode.fields.forEach { field ->
             val key = "${field.name}:${field.desc}"
-            if (existingFields.add(key)) {
+            val existing = existingFields[key]
+            if (existing == null) {
+                existingFields[key] = field
                 baseNode.fields.add(field)
                 added++
             } else {
+                existing.access = mergeVisibilityAccess(existing.access, field.access)
                 duplicates++
             }
         }
@@ -268,20 +274,53 @@ object AndroidJarMerger {
         baseNode: ClassNode,
         frameworkNode: ClassNode,
     ): MergeCount {
-        val existingMethods = baseNode.methods
-            .mapTo(linkedSetOf()) { method -> "${method.name}${method.desc}" }
+        val existingMethods = linkedMapOf<String, org.objectweb.asm.tree.MethodNode>()
+        baseNode.methods.forEach { method ->
+            existingMethods["${method.name}${method.desc}"] = method
+        }
         var added = 0
         var duplicates = 0
         frameworkNode.methods.forEach { method ->
             val key = "${method.name}${method.desc}"
-            if (existingMethods.add(key)) {
+            val existing = existingMethods[key]
+            if (existing == null) {
+                existingMethods[key] = method
                 baseNode.methods.add(method)
                 added++
             } else {
+                existing.access = mergeVisibilityAccess(existing.access, method.access)
                 duplicates++
             }
         }
         return MergeCount(added, duplicates)
+    }
+
+    private fun mergeVisibilityAccess(
+        primaryAccess: Int,
+        secondaryAccess: Int,
+    ): Int {
+        val preservedFlags = primaryAccess and VISIBILITY_MASK.inv()
+        return preservedFlags or maxVisibility(primaryAccess, secondaryAccess)
+    }
+
+    private fun maxVisibility(
+        primaryAccess: Int,
+        secondaryAccess: Int,
+    ): Int {
+        return if (visibilityRank(secondaryAccess) > visibilityRank(primaryAccess)) {
+            secondaryAccess and VISIBILITY_MASK
+        } else {
+            primaryAccess and VISIBILITY_MASK
+        }
+    }
+
+    private fun visibilityRank(access: Int): Int {
+        return when {
+            access and Opcodes.ACC_PUBLIC != 0 -> 3
+            access and Opcodes.ACC_PROTECTED != 0 -> 2
+            access and Opcodes.ACC_PRIVATE != 0 -> 0
+            else -> 1
+        }
     }
 
     private fun mergeInnerClasses(
@@ -535,6 +574,7 @@ object AndroidJarMerger {
     private const val PACKAGE_INFO_SUFFIX = "/package-info.class"
     private const val MODULE_INFO_CLASS = "module-info.class"
     private const val MAX_FALLBACK_REASON_LENGTH = 200
+    private const val VISIBILITY_MASK = Opcodes.ACC_PUBLIC or Opcodes.ACC_PROTECTED or Opcodes.ACC_PRIVATE
 
     private val EXCLUDED_FRAMEWORK_PREFIXES = listOf(
         "java/",

@@ -160,7 +160,7 @@ class FrameworkOverlayService(private val project: Project) {
         }
 
         val requestKey = buildRequestKey(frameworkJar, config.viewPreference, moduleTargets)
-        if (isAlreadyApplied(requestKey, config.viewPreference, moduleTargets, sdkOverlayService)) {
+        if (isAlreadyApplied(requestKey, config.viewPreference, moduleTargets, sdkOverlayService, frameworkJar)) {
             return null
         }
 
@@ -200,6 +200,7 @@ class FrameworkOverlayService(private val project: Project) {
         viewPreference: FrameworkViewPreference,
         moduleTargets: List<ModuleTarget>,
         sdkOverlayService: FrameworkSdkOverlayService,
+        frameworkJar: java.nio.file.Path,
     ): Boolean {
         synchronized(stateLock) {
             if (requestKey != lastAppliedRequestKey) {
@@ -208,7 +209,12 @@ class FrameworkOverlayService(private val project: Project) {
         }
 
         return moduleTargets.all { target ->
-            sdkOverlayService.isUsableManagedOverlaySdk(target.currentSdk, viewPreference)
+            sdkOverlayService.isExpectedManagedOverlaySdk(
+                sdk = target.currentSdk,
+                baseSdk = target.baseSdk,
+                frameworkJarPath = frameworkJar,
+                viewPreference = viewPreference,
+            )
         }
     }
 
@@ -324,6 +330,10 @@ class FrameworkOverlayService(private val project: Project) {
             } else if (hadFailure && preparedRequest.request.viewPreference == FrameworkViewPreference.FRAMEWORK_FIRST) {
                 disableOverlay()
             }
+            sdkOverlayService.cleanupObsoleteSchemaCaches(
+                activeOverlayHomes = preparedRequest.preparedByKey.values
+                    .mapNotNull { result -> (result as? PreparedResult.Prepared)?.spec?.overlayHome },
+            )
             finishRequest(preparedRequest.request.key, applied = appliedAny)
         }
     }
